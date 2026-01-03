@@ -1,0 +1,73 @@
+from dataclasses import dataclass
+from typing import Union, List, Dict
+from ..trajectory_data import StepData, TrajectoryData
+
+def flatten_messages(messages: list[dict]):
+    """
+    将 PromptBuilder 生成的结构化消息 (List[Dict]) 转换为 LLM 引擎所需的扁平格式。
+    SolverPromptBuilder 生成的 content 通常是 [{'type': 'text', 'text': '...'}]。
+    我们需要将其合并为一个单一的字符串。
+    """
+    flattened_messages = []
+    for message in messages:
+        role = message['role']
+        content = message['content']
+        
+        if isinstance(content, list):
+            text = '\n\n'.join(c['text'] for c in content if 'text' in c)
+        elif isinstance(content, str):
+            text = content
+        else:
+            text = str(content)
+            
+        flattened_messages.append({'role': role, 'content': text})
+    return flattened_messages
+
+
+class BasePromptBuilder:
+    
+    def build_trajectory_messages(self, trajectory_data: TrajectoryData, char_limit: int = -1) -> list[dict]: 
+        raise NotImplementedError
+    
+    def build_messages(self, goal: str, current_step: StepData, history: list[StepData], char_limit: int = -1) -> dict:
+        raise NotImplementedError
+    
+    def pretty_prompt_string(self, messages: list[dict]) -> str:
+        """
+        Convert a list of prompt messages into a single string suitable for printing/debugging.
+        """
+        prompt_text_strings = []
+        for message in messages:
+            role = message.get('role', 'unknown').upper()
+            content = message.get('content', '')
+            
+            if isinstance(content, list):
+                text_content = "\n".join([item.get('text', '') for item in content])
+            else:
+                text_content = str(content)
+                
+            prompt_text_strings.append(f"=== {role} ===\n{text_content}")
+            
+        full_prompt_txt = "\n\n".join(prompt_text_strings)
+        return full_prompt_txt        
+
+PROMPT_BUILDER_REGISTRY: dict[str, BasePromptBuilder] = {}
+
+class PromptBuilderFactory:
+
+    def create_prompt_builder(self, name: str, **kwargs):
+        if name not in PROMPT_BUILDER_REGISTRY:
+            raise ValueError(f"Unknown prompt builder: {name}")
+        return PROMPT_BUILDER_REGISTRY[name](**kwargs)
+    
+    @staticmethod
+    def register(cls, aliases: str | tuple[str] = tuple()):
+        PROMPT_BUILDER_REGISTRY[cls.__name__] = cls
+
+        if isinstance(aliases, str):
+            aliases = (aliases,)
+
+        for name in aliases:
+            PROMPT_BUILDER_REGISTRY[name] = cls
+            
+        return cls

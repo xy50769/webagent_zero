@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .node import Node
 from .trace import Trace
+from .trajectory import TrajectoryStep
 from typing import Sequence, Callable, Tuple
 import json
 import logging
@@ -129,7 +130,7 @@ class Graph:
     #  Phase 1-3 Transition Processing (Input -> Process)
     # =========================================================
 
-    def process_transition(self, obs_t: dict, action: str, obs_t1: dict, success: bool, hint: str = "") -> Node:
+    def process_transition(self, obs_t: dict, action: str, obs_t1: dict, success: bool, hint: str = "", thought: str = None) -> Node:
         """
         [核心接口] 处理 (O_t, a_t, O_{t+1}) 三元组
         
@@ -137,6 +138,7 @@ class Graph:
         1. Encode: 计算向量 V_t, V_{t+1}
         2. Match: 匹配或创建节点 S_t, S_{t+1}
         3. Update: 更新边 (S_t -> S_{t+1}) 的统计数据
+        4. Create Trace: 创建从 source_node 到 target_node 的 Trace 并添加到 prefixes
         
         Output:
         返回当前的新状态节点 S_{t+1}
@@ -161,12 +163,14 @@ class Graph:
         vec_t1 = self.encoder_fn(obs_t1)
         match_node, sim = self._find_matching_node(vec_t1)
         
+        is_new_node = False
         if match_node and sim >= self.similarity_threshold:
             logger.info(f"Matched existing state {match_node.node_id} (Sim: {sim:.4f})")
             target_node = match_node
         else:
             logger.info(f"State not found (Max Sim: {sim:.4f}). Creating new state.")
             target_node = self._create_node(obs_t1, vec_t1, hint)
+            is_new_node = True
 
         # --- 3. 更新图结构与统计 (Edges) ---
         
@@ -178,10 +182,41 @@ class Graph:
         # 3.2 更新边统计信息 (Action Success Rate)
         self._update_edge_stats(source_node.node_id, target_node.node_id, success, target_element=action)
 
-        # 3.3 状态管理
+        # 3.3 创建 Trace 并添加到 target_node 的 prefixes
+        # 为所有成功的 transition 创建 prefix（用于后续 replay）
+        if success:
+            try:
+                # 创建 TrajectoryStep
+                step = TrajectoryStep(
+                    action=action,
+                    parsed_action=action,
+                    thought=thought or "",
+                    observation=obs_t1,
+                    misc={"hint": hint, "success": success, "source_node": source_node.node_id}
+                )
+                
+                # 创建 Trace
+                start_url = obs_t.get("url", "")
+                end_url = obs_t1.get("url", "")
+                trace = Trace.from_trajectory_steps(
+                    steps=[step],
+                    start_url=start_url,
+                    end_url=end_url,
+                    misc={"source_node": source_node.node_id, "target_node": target_node.node_id, "is_new_node": is_new_node}
+                )
+                
+                # 添加到 target_node 的 prefixes（只有当这是一个新节点，或者还没有 prefix 时）
+                # 避免重复添加相同的 prefix
+                if is_new_node or len(target_node.prefixes) == 0:
+                    target_node.add_prefix(trace)
+                    logger.info(f"Created prefix trace for {target_node.node_id}: {start_url} -> {end_url}")
+            except Exception as e:
+                logger.warning(f"Failed to create prefix trace: {e}")
+
+        # 3.4 状态管理
         self.add_to_explored(source_node)
         
-        # 3.4 移动指针
+        # 3.5 移动指针
         self.current_node = target_node
         
         return target_node
