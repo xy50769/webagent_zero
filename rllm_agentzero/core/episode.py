@@ -1,23 +1,17 @@
-from .agent import AgentWithExplorationCallbacks, ExplorerAgentWithExplorationCallbacks, wrap_agent_for_callback_protocol
 from .evaluator import Evaluator
 from .graph import Graph
 from .node import Node
-from .task import Task
 from .trajectory import Trajectory, TrajectoryStep
-from ...agents.base_agent import Agent, ExplorerAgent
+import logging
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from ..agents.base_agent import BaseAgent
+
 from browsergym.core.env import BrowserEnv
 from browsergym.experiments.loop import _send_chat_info
-from tenacity import retry, stop_after_attempt, wait_exponential
-import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 @retry(
     stop=stop_after_attempt(3),
@@ -26,95 +20,80 @@ if not logger.handlers:
 def reset_env_to_node(
         env: BrowserEnv,
         node: Node,
-        agent: Agent,
+        agent: BaseAgent,
         goal: str,
 ):
     """
-    Reset the environment to a given node.
-    
-    Args:
-        env: The environment to reset.
-        node (Node): The node to reset to.
-        agent (BaseAgent): The agent to reset.
-        goal (str): The goal for the episode.
+    Reset the environment to a given node using Trace Replay or Direct Navigation.
     """
-    
     logger.info(f"Resetting environment to node: {node.url}...")
     
+    # 1. 基础重置 (在 Wrapper 上调用是安全的，也是推荐的)
     env.reset()
-    env.action_mapping = agent.action_processor
+    
+    # 2. [关键修复] 获取底层环境以访问 page, chat, action_mapping
+    browser_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    
+    # 绑定动作解析器
+    browser_env.action_mapping = agent.action_processor
+    
+    # 3. 导航逻辑
+    # 优先使用 Trace Replay
     if node.prefixes and len(node.prefixes) > 0:
         best_trace = node.prefixes[0]
-        logger.info(f"Replaying best prefix trace to reach node: {node.url}...")
-        success = best_trace.replay(env)
-        if not success:
-            logger.warning(f"Failed to replay trace to node: {node.url}. Proceeding with direct navigation.")
-            env.page.goto(node.url)
-    else:
-        logger.info(f"No prefix trace found for node: {node.url}. Navigating directly.")
+        logger.info(f"Replaying prefix trace ({len(best_trace)} steps) to reach node: {node.url}...")
         try:
-            env.page.goto(node.url)
-            env.page.wait_for_load_state("domcontentloaded",timeout=5000)
+            # Trace replay 需要直接操作 browser_env (因为它需要 page 对象)
+            # 注意: trace.replay 内部如果用了 env.page，传入 browser_env 最稳妥
+            success = best_trace.replay(browser_env) 
+            if not success:
+                logger.warning(f"Failed to replay trace. Fallback to direct navigation.")
+                browser_env.page.goto(node.url)
         except Exception as e:
-            logger.error(f"Error navigating to {node.url}: {e}. Retrying...")
+            logger.error(f"Error replaying trace: {e}. Fallback to direct navigation.")
+            browser_env.page.goto(node.url)
+    else:
+        # 兜底逻辑：直接跳转
+        logger.info(f"No prefix trace found. Navigating directly.")
+        try:
+            browser_env.page.goto(node.url)
+            browser_env.page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception as e:
+            logger.error(f"Error navigating to {node.url}: {e}")
         
-    env.goal_object = [{"type": "text", "text": goal}]
-    env.chat.add_message(role="user", msg=goal)
-    obs = env._get_obs()
+    # 4. 设置 Goal 和 Chat
+    browser_env.goal_object = [{"type": "text", "text": goal}]
+    browser_env.chat.add_message(role="user", msg=goal)
+    
+    # 获取 Observation (使用底层 env 也可以，或者 Wrapper 的 env.step 之后也会返回)
+    obs = browser_env._get_obs()
     return agent.obs_preprocessor(obs)
 
 
-def get_fresh_obs(env: BrowserEnv):
-    """
-    Get a fresh observation from the environment.
-    
-    Args:
-        env: The environment to get the observation from.
-    
-    Returns:
-        dict: The observation from the environment.
-    """
-    # TODO: We can make an ExplorationBrowserEnv that has a more reliable api.
-    obs = env._get_obs()
-    return obs
-
-# TODO: Can move this into a ExplorationBrowserEnv class as part of the is_done logic.
 def has_new_assistant_message(env: BrowserEnv):
-    """
-    Check if there is a new assistant message in the environment.
+    """Check if there is a new assistant message (indicating task end)."""
+    # [关键修复] 解包 env
+    browser_env = env.unwrapped if hasattr(env, "unwrapped") else env
     
-    Args:
-        env: The environment to check.
-    
-    Returns:
-        bool: True if there is a new assistant message, False otherwise.
-    """
-    chat_messages = env.chat.messages
-    if chat_messages[-1]["role"] == "assistant" or chat_messages[-1]["role"] == "infeasible":
+    if not browser_env.chat.messages:
+        return False
+    last_msg = browser_env.chat.messages[-1]
+    if last_msg["role"] == "assistant" or last_msg["role"] == "infeasible":
         return True
     return False
 
+
 def get_action(
     env: BrowserEnv,
-    agent: Agent,
+    agent: BaseAgent,
     obs: dict,
     traj: Trajectory,
     oracle_action: str = None
 ) -> tuple[str, dict]:
-    """
-    Get the action from the agent.
+    """Get action from agent and record it."""
     
-    Args:
-        env: The environment to get the action from.
-        agent (BaseAgent): The agent to get the action from.
-        obs (dict): The observation from the environment.
-        traj (Trajectory): The trajectory of the episode.
-        oracle_action (str, optional): The oracle action to use if available.
-    
-    Returns:
-        tuple: The action and action extras dict from the agent.
-    """
     action, action_extras = agent.get_action(obs, oracle_action=oracle_action)
+    
     thought = action_extras.get("thought", None)
     parsed_action = action_extras.get("parsed_action", None)
 
@@ -123,67 +102,50 @@ def get_action(
 
     logger.info(f"Agent chose action: \n{action}")
     
-    traj.add_step(action, parsed_action, thought, obs, {'model_usage': action_extras.get("model_usage", None), 'agent_config': agent.get_config()})
+    # 记录步骤到 Trajectory
+    traj.add_step(
+        action, 
+        parsed_action, 
+        thought, 
+        obs, 
+        {'model_usage': action_extras.get("model_usage", None), 'agent_config': agent.get_config()}
+    )
 
-    # TODO: Need a more stable api for modifying the chat pane. Perhaps we can create an env wrapper that exposes such as an api.
-    _send_chat_info(env.chat, action, action_extras)
+    # 同步到 Chat 界面
+    # [关键修复] 解包 env
+    browser_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    _send_chat_info(browser_env.chat, action, action_extras)
     
     return action, action_extras
 
 
 def perform_env_step(
     env: BrowserEnv,
-    agent: Agent,
+    agent: BaseAgent,
     action: str,
 ) -> tuple:
-    """
-    Perform a step in the environment.
-    
-    Args:
-        env: The environment to perform the step in.
-        agent (BaseAgent): The agent to perform the step with.
-        action (str): The action to perform.
-        traj (Trajectory): The trajectory of the episode.
-        oracle_action (str, optional): The oracle action to use if available.
-    
-    Returns:
-        tuple: The observation, reward, terminated, truncated, and env_info from the environment.
-    """
+    """Execute the action in the environment."""
+    # Step 依然要在最外层 env 上调用，以保持 Gym Wrapper 的功能 (如 TimeLimit 计数)
     obs, reward, terminated, truncated, env_info = env.step(action)
     obs = agent.obs_preprocessor(obs)
     return obs, reward, terminated, truncated, env_info
-
 
 
 def run_episode(
     goal: str,
     node: Node,
     env: BrowserEnv,
-    agent: AgentWithExplorationCallbacks,
+    agent: BaseAgent,
     evaluator: Evaluator,
     graph: Graph,
     max_steps: int,
-    callback_context: dict = None,
 ) -> Trajectory:
     """
-    Run an episode with an agent in the environment.
-    
-    Args:
-        goal (str): The goal for the episode.
-        node (Node): The current node in the graph.
-        env: The environment.
-        agent (BaseAgent): The agent to run the episode.
-        evaluator (Evaluator): The evaluator to evaluate the episode.
-        graph (Graph): The graph of nodes.
-        max_steps (int): The maximum number of steps in the episode.
-    
-    Returns:
-    
-        Trajectory: The trajectory of the episode.
+    Run a complete RLLM episode: Reset -> Loop(Action->Step) -> Evaluate.
     """
+    logger.info(f"Running episode for goal: {goal}, at node {node.url}...")
 
-    logger.info(f"Running episode for goal: {goal}, for node {node.url}...")
-
+    # 1. 环境重置 (内部已处理 unwrapped)
     obs = reset_env_to_node(
         env=env,
         node=node,
@@ -192,25 +154,16 @@ def run_episode(
     )
     
     agent.reset()
-
     traj = Trajectory.from_goal(goal, agent.get_config())
     
     num_steps = 0
     done = False
 
-    callback_context_seed = callback_context if callback_context else {}
-
     while not done and num_steps < max_steps:
-        
         logger.info(f"Step {num_steps} for goal {goal}.")
         num_steps += 1
 
-        callback_context = {**callback_context_seed}
-
-        num_steps, obs, reward, terminated, truncated, env_info, goal, callback_context = agent.run_pre_step_callbacks(
-            num_steps, goal, env, graph, node, traj, obs, 0.0, False, False, {}, callback_context
-        )
-
+        # 2. 获取动作
         action, action_extras = get_action(
             env=env,
             agent=agent,
@@ -222,34 +175,39 @@ def run_episode(
             logger.info("Agent returned None action. Ending episode.")
             break
 
+        # 3. 执行动作 (在 wrapped env 上执行)
         obs, reward, terminated, truncated, env_info = perform_env_step(
             env=env,
             agent=agent,
             action=action,
         )
         
+        # 4. 检查是否结束 (BrowserGym 特有逻辑)
+        # 这里传入 env 即可，函数内部会 handle unwrapped
         if has_new_assistant_message(env):
-            logger.info("New assistant message received.")
+            logger.info("New assistant message received. Task claimed done.")
             terminated = True
-
-            # We only need to evaluate if the when we are not exploring.
-            if not isinstance(agent, ExplorerAgent):
-                    logger.info("Evaluating episode...")
+            
+            # 5. 触发评估 (Evaluator)
+            if evaluator:
+                logger.info("Evaluating episode with GPT-4V...")
+                try:
                     evaluator.evaluate(traj)
-                    logger.info(f"Episode evaluated and received reward {traj.reward}.")
-
-        num_steps, obs, reward, terminated, truncated, env_info, goal, callback_context = agent.run_post_step_callbacks(
-            num_steps, goal, env, graph, node, traj, obs, reward, terminated, truncated, env_info, callback_context
-        )
+                    logger.info(f"Episode evaluated. Success: {traj.success}, Reward: {traj.reward}")
+                except Exception as e:
+                    logger.error(f"Evaluation failed: {e}")
+                    traj.success = False
+                    traj.reward = 0.0
 
         done = terminated or truncated
 
-    traj.extract_response(env)
+    # 6. 整理最终结果
+    traj.extract_response(env.unwrapped if hasattr(env, "unwrapped") else env)
     traj.final_state = TrajectoryStep(
         action=None,
         parsed_action=None,
         thought=None,
-        observation=obs,
+        observation=obs, 
         misc=None,
     )
 

@@ -1,0 +1,5 @@
+{
+  "OPENAI_API_KEY": "sk-...",
+  "OPENAI_BASE_URL": "https://api.example.com",
+  "OPENAI_MODEL_NAME": "gpt-4o"
+}

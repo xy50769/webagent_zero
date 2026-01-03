@@ -5,7 +5,6 @@ final state matches the expected outcome.'''
 
 import logging
 import gymnasium as gym
-import browsergym.core
 import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
