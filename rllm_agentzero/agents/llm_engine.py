@@ -17,12 +17,13 @@ class LLMEngine:
         return cls._instance
 
     def __init__(self, api_url: str = "http://127.0.0.1:6006/generate"):
+        """Initialize LLMEngine with API URL."""
         self.api_url = api_url
-        logger.info(f"🔌 Connected to Remote LLM Engine at {self.api_url}")
+        logger.info(f"Connected to Remote LLM Engine at {self.api_url}")
 
     def generate(self, system_msg: str, user_msg: str, mode: str = "base", temperature: float = 0.01) -> str:
         """
-        发送 HTTP 请求获取生成结果
+        send http to get response
         """
         payload = {
             "system_msg": system_msg,

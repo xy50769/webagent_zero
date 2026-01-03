@@ -15,11 +15,8 @@ if not logger.handlers:
 
 class LLMEngine:
     """
-    RLLM 推理引擎 (单例模式)
-    职责:
-    1. 加载 Merge 后的 Base Model
-    2. 动态挂载/切换 Adapter
-    3. 统一 Prompt 格式化 (apply_chat_template)
+    LLM inference engine (singleton pattern).
+    Loads base model, manages adapter switching, and formats prompts.
     """
     _instance = None
 
@@ -34,7 +31,7 @@ class LLMEngine:
                  use_4bit: bool = True,
                  max_new_tokens: int = 8192
                  ):
-
+        """Initialize LLM engine with base model and optional adapter."""
         if hasattr(self, 'initialized') and self.initialized:
             return
         
@@ -73,6 +70,7 @@ class LLMEngine:
         self.initialized = True 
 
     def construct_prompt(self, system_msg: str, user_msg: str) -> str:
+        """Format system and user messages using chat template."""
         messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
@@ -85,10 +83,10 @@ class LLMEngine:
         return text
     
     def generate(self, system_msg: str, user_msg: str, mode: str = "base", temperature: float = 0.01) -> str:
+        """Generate text using base model or adapter based on mode."""
         prompt_text = self.construct_prompt(system_msg, user_msg)
         inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.device)
 
-        
         try:
             with torch.no_grad():
                 if mode == "base" and self.proposer_adapter_loaded:
