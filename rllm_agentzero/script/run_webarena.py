@@ -1,5 +1,5 @@
 from agentlab.experiments.study import make_study, AgentArgs, Study
-from ..agents.base_agent import AgentFactory
+from ..agents_old.base_agent import AgentFactory
 from dataclasses import dataclass
 from omegaconf import OmegaConf as oc
 import argparse

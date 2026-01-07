@@ -7,8 +7,8 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from rllm_agentzero.agents.explorer_agent import ExplorerAgent
-from rllm_agentzero.agents.server.llm_engine import LLMEngine
+from rllm_agentzero.agents_old.explorer_agent import ExplorerAgent
+from rllm_agentzero.agents_old.server.llm_engine import LLMEngine
 from browsergym.core.task import AbstractBrowserTask
 from browsergym.core.env import BrowserEnv
 

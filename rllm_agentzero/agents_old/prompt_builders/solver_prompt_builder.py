@@ -1,3 +1,6 @@
+from rllm_agentzero.agents_old.trajectory_data import BrowserGymAgentStepData
+
+
 from . import BasePromptBuilder, flatten_messages
 from ..trajectory_data import BrowserGymAgentStepData, BrowserGymAgentTrajectoryData
 from browsergym.core.action.base import AbstractActionSet

@@ -2,6 +2,7 @@ from .evaluator import Evaluator
 from .graph import Graph
 from .node import Node
 from .trajectory import Trajectory, TrajectoryStep
+from .task import Task
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -123,10 +124,18 @@ def perform_env_step(
     env: BrowserEnv,
     agent: BaseAgent,
     action: str,
+    target_info: dict = None,
+    step_count: int = 0,
 ) -> tuple:
     """Execute the action in the environment."""
     # Step 依然要在最外层 env 上调用，以保持 Gym Wrapper 的功能 (如 TimeLimit 计数)
     obs, reward, terminated, truncated, env_info = env.step(action)
+    
+    # 注入 target_info 和 step_count，确保在 obs_preprocessor 中可用
+    if target_info is not None:
+        obs["target_info"] = target_info
+    obs["step_count"] = step_count
+    
     obs = agent.obs_preprocessor(obs)
     return obs, reward, terminated, truncated, env_info
 
@@ -139,6 +148,7 @@ def run_episode(
     evaluator: Evaluator,
     graph: Graph,
     max_steps: int,
+    task: Task = None,
 ) -> Trajectory:
     """
     Run a complete RLLM episode: Reset -> Loop(Action->Step) -> Evaluate.
@@ -153,6 +163,15 @@ def run_episode(
         goal=goal,
     )
     
+    # 提取 Target Info
+    target_info = {}
+    if task and task.target_edge:
+        target_info = {
+            "target_element": task.target_edge.get("target_element", ""),
+            "target_node_id": task.target_edge.get("target_node_id", ""),
+            "action_skill": task.target_edge.get("action_skill", ""),
+        }
+    
     agent.reset()
     traj = Trajectory.from_goal(goal, agent.get_config())
     
@@ -162,6 +181,10 @@ def run_episode(
     while not done and num_steps < max_steps:
         logger.info(f"Step {num_steps} for goal {goal}.")
         num_steps += 1
+
+        # 注入 target_info 和 step_count 到 obs
+        obs["target_info"] = target_info
+        obs["step_count"] = num_steps
 
         # 2. 获取动作
         action, action_extras = get_action(
@@ -175,11 +198,13 @@ def run_episode(
             logger.info("Agent returned None action. Ending episode.")
             break
 
-        # 3. 执行动作 (在 wrapped env 上执行)
+        # 3. 执行动作 (传递 target_info 和 step_count)
         obs, reward, terminated, truncated, env_info = perform_env_step(
             env=env,
             agent=agent,
             action=action,
+            target_info=target_info,
+            step_count=num_steps,
         )
         
         # 4. 检查是否结束 (BrowserGym 特有逻辑)

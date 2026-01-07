@@ -8,7 +8,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from rllm_agentzero.agents.solver_agent import SolverAgent
+from rllm_agentzero.agents_old.solver_agent import SolverAgent
 from browsergym.core.task import AbstractBrowserTask
 from browsergym.core.env import BrowserEnv
 

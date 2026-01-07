@@ -12,7 +12,7 @@ from rllm_agentzero.core.episode import run_episode
 
 # 尝试导入 BaseAgent，兼容不同的项目结构
 try:
-    from rllm_agentzero.agents.base_agent import BaseAgent
+    from rllm_agentzero.agents_old.base_agent import BaseAgent
 except ImportError:
     try:
         from agents.base_agent import BaseAgent

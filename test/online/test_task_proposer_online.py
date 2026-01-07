@@ -6,8 +6,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from rllm_agentzero.agents.task_proposer import TaskProposer
-from rllm_agentzero.agents.server.llm_engine import LLMEngine
+from rllm_agentzero.agents_old.task_proposer import TaskProposer
+from rllm_agentzero.agents_old.server.llm_engine import LLMEngine
 from rllm_agentzero.core.graph import Graph
 from rllm_agentzero.core.node import Node
 

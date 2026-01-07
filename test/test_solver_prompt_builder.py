@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from rllm_agentzero.agents.prompt_builders.solver_prompt_builder import SolverPromptBuilder
-from rllm_agentzero.agents.trajectory_data import BrowserGymAgentStepData, BrowserGymAgentTrajectoryData
+from rllm_agentzero.agents_old.prompt_builders.solver_prompt_builder import SolverPromptBuilder
+from rllm_agentzero.agents_old.trajectory_data import BrowserGymAgentStepData, BrowserGymAgentTrajectoryData
 
 
 def create_mock_action_set():

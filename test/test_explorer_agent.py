@@ -5,9 +5,9 @@ from collections import Counter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from rllm_agentzero.agents.explorer_agent import ExplorerAgent
-from rllm_agentzero.agents.server.llm_engine import LLMEngine
-from rllm_agentzero.agents.trajectory_data import BrowserGymAgentStepData
+from rllm_agentzero.agents_old.explorer_agent import ExplorerAgent
+from rllm_agentzero.agents_old.server.llm_engine import LLMEngine
+from rllm_agentzero.agents_old.trajectory_data import BrowserGymAgentStepData
 from rllm_agentzero.core.node import Node
 
 

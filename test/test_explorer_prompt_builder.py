@@ -4,8 +4,8 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from rllm_agentzero.agents.prompt_builders.explorer_prompt_builder import RLLMExplorerPromptBuilder
-from rllm_agentzero.agents.trajectory_data import BrowserGymAgentStepData
+from rllm_agentzero.agents_old.prompt_builders.explorer_prompt_builder import RLLMExplorerPromptBuilder
+from rllm_agentzero.agents_old.trajectory_data import BrowserGymAgentStepData
 
 
 def create_mock_action_set():
