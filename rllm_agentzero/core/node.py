@@ -202,14 +202,14 @@ class Node:
         """
             register_elements registers the interactive elements on the page (called when first visiting the node)
         """
+        # 移除严格的 visible 和 clickable 过滤，让更多元素可以被探索
         filtered_elements = [
             {
                 "bid": item.get("bid", ""),
                 "text": item.get("text", ""),
                 "role": item.get("role", "unknown")
             }
-            for item in elements 
-            if item.get('visible') and item.get('clickable')
+            for item in elements
         ]
         self.interactive_elements = filtered_elements
         logger.info(f"Registered {len(filtered_elements)} interactive elements for node {self.node_id}")
