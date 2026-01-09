@@ -20,15 +20,32 @@ def extract_action_and_thought(raw_string):
     
     try:
         # 1. JSON 格式优先
+        # 先去除前后空白
+        raw_string = raw_string.strip()
+        
+        # 尝试直接解析整个字符串（如果以 { 开头）
+        if raw_string.startswith('{'):
+            try:
+                data = json.loads(raw_string)
+                thought = data.get("thought", "")
+                action = data.get("action", "")
+                if thought or action:
+                    return thought, action
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试查找 JSON 对象
         json_match = re.search(r'\{.*\}', raw_string, re.DOTALL)
         if json_match:
             try:
-                data = json.loads(json_match.group(0))
+                json_str = json_match.group(0)
+                data = json.loads(json_str)
                 thought = data.get("thought", "")
                 action = data.get("action", "")
-                return thought, action
-            except json.JSONDecodeError:
-                pass
+                if thought or action:
+                    return thought, action
+            except json.JSONDecodeError as e:
+                logger.debug(f"JSON decode failed: {e}, trying text format")
         
         # 2. 文本格式兜底
         t_match = re.search(r'Thought:\s*(.*?)(?=Action:|$)', raw_string, re.DOTALL | re.IGNORECASE)
@@ -118,7 +135,11 @@ class SolverAgent(BaseAgent):
         }
     
     def action_processor(self, action: str) -> str:
-        return self.action_set.to_python_code(action)
+        action = action.strip()
+        logger.info(f"[DEBUG] Raw action input to action_processor: {repr(action[:200])}")
+        result = self.action_set.to_python_code(action)
+        logger.info(f"[DEBUG] Parsed action output (first 200 chars): {repr(result[:200])}")
+        return result
 
     def _extract_target_id_from_action(self, action_str: str) -> Optional[str]:
         """
@@ -242,10 +263,10 @@ class SolverAgent(BaseAgent):
             action, thought = oracle_action
             raw_output = json.dumps({"thought": thought, "action": action})
 
-        logger.info(f"🤖 Solver: {action}")
+        logger.info(f"Solver: {action}")
 
-        # === Grounding ===
-        parsed_action = self.action_processor(action) if action else ""
+        # === BrowserGym env.step() will handle action parsing ===
+        # No need to call action_processor here
 
         # === [核心] 计算奖励 ===
         inner_reward, reward_details = self._calculate_inner_reward(
@@ -260,8 +281,7 @@ class SolverAgent(BaseAgent):
         current_step.thought = thought
         current_step.misc.update({
             "thought": thought, 
-            "raw_action": action, 
-            "parsed_action": parsed_action,
+            "raw_action": action,
             "raw_output": raw_output,
             # [新增] 奖励信息
             "inner_reward": inner_reward,
@@ -271,5 +291,5 @@ class SolverAgent(BaseAgent):
         
         self.history.append(current_step)
 
-        # 返回 parsed_action 给环境执行，extras 包含所有训练所需数据
-        return parsed_action, current_step.misc
+        # 返回 action 给 BrowserGym 环境执行（环境会自动解析）
+        return action, current_step.misc

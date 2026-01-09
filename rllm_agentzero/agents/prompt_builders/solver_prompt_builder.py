@@ -40,12 +40,13 @@ class SolverPromptBuilder(BasePromptBuilder):
 
     def build_messages(self, goal: str, current_step: BrowserGymAgentStepData, history: list[BrowserGymAgentStepData], char_limit: int=-1) -> dict:
         past_thoughts = [step.thought for step in history]
-        past_actions = [step.misc['parsed_action'] if 'parsed_action' in step.misc else step.action for step in history]
+        # Use raw_action (concise LLM output) instead of parsed_action (full executable code)
+        past_actions = [step.misc.get('raw_action', step.action) if step.misc else step.action for step in history]
         
         axtree = current_step.axtree
         last_action_error = current_step.last_action_error
         completion_thought = current_step.thought
-        completion_action = current_step.misc['parsed_action'] if current_step.misc and 'parsed_action' in current_step.misc else current_step.action
+        completion_action = current_step.misc.get('raw_action', current_step.action) if current_step.misc else current_step.action
 
         add_completion = completion_thought or completion_action
         
@@ -143,6 +144,11 @@ class SolverPromptBuilder(BasePromptBuilder):
                     # Instructions
                     You are a UI Assistant, your goal is to help the user perform tasks using a web browser. 
                     Review the instructions from the user, the current state of the page and all other information to find the best possible next action to accomplish your goal. Your answer will be interpreted and executed by a program, make sure to follow the formatting instructions.
+                    
+                    ## Action Format Requirements
+                    **CRITICAL**: When interacting with elements, you MUST use the element's bid (browsergym id) which is shown in square brackets in the accessibility tree.
+                    - CORRECT: click('42') where 42 is the bid from [42] in the tree
+                    - WRONG: click('Submit Button') or click('Next Page') - do NOT use text labels
                     """
                 )
         }

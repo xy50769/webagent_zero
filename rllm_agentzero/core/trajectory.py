@@ -6,14 +6,18 @@ import os
 
 def _extract_text_obs(observation):
     """
-    Recursively extract all textual observations from a nested structure.
+    Recursively extract all JSON-serializable observations from a nested structure.
+    Filters out non-serializable types like numpy arrays, images, etc.
     """
-    if isinstance(observation, str):
+    # Basic JSON-serializable types
+    if isinstance(observation, (str, int, float, bool)) or observation is None:
         return observation
     elif isinstance(observation, dict):
-        return {k: _extract_text_obs(v) for k, v in observation.items() if isinstance(v, (str, dict, list))}
+        return {k: _extract_text_obs(v) for k, v in observation.items() 
+                if not isinstance(v, (np.ndarray, Image.Image))}
     elif isinstance(observation, list):
-        return [_extract_text_obs(item) for item in observation if isinstance(item, (str, dict, list))]
+        return [_extract_text_obs(item) for item in observation 
+                if not isinstance(item, (np.ndarray, Image.Image))]
     return None
 
 @dataclass

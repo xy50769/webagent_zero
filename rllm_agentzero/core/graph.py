@@ -24,6 +24,7 @@ class Graph:
             root_url: str, 
             exp_dir: str, 
             encoder_fn: Callable[[dict], list[float]], # [必须] 外部传入的 Encoder 函数
+            encoder_name: str = "",                     # [新增] Encoder 名称
             similarity_threshold: float = 0.95,        # [参数] 判定同一状态的阈值
             allowlist_patterns: Sequence[str] = tuple(), 
             denylist_patterns: Sequence[str] = tuple(), 
@@ -32,6 +33,7 @@ class Graph:
         """
         World Model Graph
         :param encoder_fn: 函数，接收 obs(dict) 返回 embedding(list[float])
+        :param encoder_name: Encoder 的名称（例如 "openai/clip-vit-base-patch32"）
         :param similarity_threshold: 余弦相似度阈值，大于此值视为同一节点
         """
         self.nodes: dict[str, Node] = {} # Key: node_id (e.g., "node_0")
@@ -46,19 +48,28 @@ class Graph:
         
         # World Model 核心组件
         self.encoder_fn = encoder_fn
+        self.encoder_name = encoder_name
         self.similarity_threshold = similarity_threshold
         self.current_node: Node | None = None # 指针：Agent 当前认为自己所在的抽象节点
+        
+        # 统计信息
+        self.total_steps: int = 0  # 全局累计步数
 
         if not resume:
             os.makedirs(self.exp_dir, exist_ok=True)
             self._save_graph_info(root_url)
 
-    def _save_graph_info(self, root_url: str):
+    def _save_graph_info(self, root_url: str = ""):
+        from datetime import datetime
+        
         graph_info = {
-            "root_url": root_url,
-            "allowlist_patterns": self.allowlist_patterns,
-            "denylist_patterns": self.denylist_patterns,
-            "similarity_threshold": self.similarity_threshold
+            "root_node_id": "node_0" if "node_0" in self.nodes else "",
+            "encoder_name": self.encoder_name,
+            "similarity_threshold": self.similarity_threshold,
+            
+            "total_steps": self.total_steps,
+            "total_nodes": len(self.nodes),
+            "last_updated": datetime.now().isoformat()
         }
         with open(os.path.join(self.exp_dir, "graph_info.json"), "w") as f:
             json.dump(graph_info, f, indent=4)
@@ -99,11 +110,14 @@ class Graph:
         
         return best_node, best_sim
 
-    def _create_node(self, obs: dict, embedding: list[float], hint: str = "") -> Node:
+    def _create_node(self, obs: dict, embedding: list[float], hint: str = "", parent_node: Node = None) -> Node:
         """创建一个新的抽象状态节点"""
         # 生成独立于内容的 ID: node_0, node_1, ...
         node_id = f"node_{len(self.nodes)}"
         url = obs.get("url", "")
+        
+        # 计算 depth：如果有父节点，则为父节点 depth + 1，否则为 0（root 节点）
+        depth = parent_node.depth + 1 if parent_node else 0
         
         node_exp_dir = os.path.join(self.exp_dir, node_id)
         
@@ -115,7 +129,9 @@ class Graph:
             tasks={},
             exploration_tasks={},
             children=[],
-            prefixes=[],
+            depth=depth,
+            visit_count=0,
+            traces=[],
             visited=False,
             exp_dir=node_exp_dir
         )
@@ -123,7 +139,36 @@ class Graph:
         self.nodes[node_id] = new_node
         self.unexplored_nodes.append(new_node)
         
-        logger.info(f"✨ Created NEW Abstract State {node_id} (URL: {url})")
+        # 立即注册可交互元素（包括 root 节点）
+        from .element_utils import extract_interactive_elements
+        
+        # 优先使用 obs 中已提取的 interactive_elements
+        if "interactive_elements" in obs:
+            elements = obs["interactive_elements"]
+        else:
+            # 如果没有，从 axtree 中提取
+            elements = extract_interactive_elements(
+                obs.get("axtree_txt", ""),
+                obs.get("extra_element_properties", {})
+            )
+        
+        if elements:
+            new_node.register_elements(elements)
+            logger.info(f"Created NEW Abstract State {node_id} (URL: {url}, Depth: {depth}) with {len(elements)} interactive elements")
+        else:
+            logger.info(f"Created NEW Abstract State {node_id} (URL: {url}, Depth: {depth})")
+        
+        # 保存截图（如果有）
+        if "screenshot" in obs:
+            new_node.update_save(
+                save_traces=False, 
+                save_info=True,
+                save_screenshot=True,
+                screenshot=obs["screenshot"]
+            )
+        else:
+            new_node.update_save(save_traces=False, save_info=True)
+        
         return new_node
 
     # =========================================================
@@ -138,11 +183,14 @@ class Graph:
         1. Encode: 计算向量 V_t, V_{t+1}
         2. Match: 匹配或创建节点 S_t, S_{t+1}
         3. Update: 更新边 (S_t -> S_{t+1}) 的统计数据
-        4. Create Trace: 创建从 source_node 到 target_node 的 Trace 并添加到 prefixes
+        4. Create Trace: 创建从 source_node 到 target_node 的 Trace 并添加到 traces
         
         Output:
         返回当前的新状态节点 S_{t+1}
         """
+        
+        # --- 0. 更新步数统计 ---
+        self.total_steps += 1
         
         # --- 1. 确定源节点 S_t ---
         # 理想情况下，S_t 应该是 self.current_node。
@@ -157,7 +205,24 @@ class Graph:
                 source_node = match_node
                 logger.info(f"Localized to existing start node: {source_node.node_id}")
             else:
-                source_node = self._create_node(obs_t, vec_t, hint="Start/Root")
+                source_node = self._create_node(obs_t, vec_t, hint="Start/Root", parent_node=None)
+        
+        # 确保 source_node 有元素注册（兼容旧数据或首次访问）
+        if len(source_node.interactive_elements) == 0:
+            from .element_utils import extract_interactive_elements
+            
+            # 优先使用 obs 中已提取的 interactive_elements
+            if "interactive_elements" in obs_t:
+                elements = obs_t["interactive_elements"]
+            else:
+                elements = extract_interactive_elements(
+                    obs_t.get("axtree_txt", ""),
+                    obs_t.get("extra_element_properties", {})
+                )
+            
+            if elements:
+                source_node.register_elements(elements)
+                logger.info(f"Registered {len(elements)} interactive elements for source node {source_node.node_id}")
 
         # --- 2. 确定目标节点 S_{t+1} ---
         vec_t1 = self.encoder_fn(obs_t1)
@@ -167,9 +232,12 @@ class Graph:
         if match_node and sim >= self.similarity_threshold:
             logger.info(f"Matched existing state {match_node.node_id} (Sim: {sim:.4f})")
             target_node = match_node
+            # 更新访问计数
+            target_node.visit_count += 1
+            target_node.update_save(save_traces=False, save_info=True)
         else:
             logger.info(f"State not found (Max Sim: {sim:.4f}). Creating new state.")
-            target_node = self._create_node(obs_t1, vec_t1, hint)
+            target_node = self._create_node(obs_t1, vec_t1, hint, parent_node=source_node)
             is_new_node = True
 
         # --- 3. 更新图结构与统计 (Edges) ---
@@ -177,41 +245,45 @@ class Graph:
         # 3.1 维护父子引用
         if target_node.node_id not in source_node.children:
             source_node.children.append(target_node.node_id)
-            source_node.update_save(save_prefix=False) 
+            source_node.update_save(save_traces=False, save_info=True) 
             
         # 3.2 更新边统计信息 (Action Success Rate)
-        self._update_edge_stats(source_node.node_id, target_node.node_id, success, target_element=action)
+        self._update_edge_stats(source_node.node_id, target_node.node_id, success, action=action, target_element=action)
+        
+        # 3.2.5 记录 action 到 source_node 的 action_history（用于 exploration mask）
+        source_node.record_action(action)
 
-        # 3.3 创建 Trace 并添加到 target_node 的 prefixes
-        # 为所有成功的 transition 创建 prefix（用于后续 replay）
-        if success:
-            try:
-                # 创建 TrajectoryStep
-                step = TrajectoryStep(
-                    action=action,
-                    parsed_action=action,
-                    thought=thought or "",
-                    observation=obs_t1,
-                    misc={"hint": hint, "success": success, "source_node": source_node.node_id}
-                )
-                
-                # 创建 Trace
-                start_url = obs_t.get("url", "")
-                end_url = obs_t1.get("url", "")
-                trace = Trace.from_trajectory_steps(
-                    steps=[step],
-                    start_url=start_url,
-                    end_url=end_url,
-                    misc={"source_node": source_node.node_id, "target_node": target_node.node_id, "is_new_node": is_new_node}
-                )
-                
-                # 添加到 target_node 的 prefixes（只有当这是一个新节点，或者还没有 prefix 时）
-                # 避免重复添加相同的 prefix
-                if is_new_node or len(target_node.prefixes) == 0:
-                    target_node.add_prefix(trace)
-                    logger.info(f"Created prefix trace for {target_node.node_id}: {start_url} -> {end_url}")
-            except Exception as e:
-                logger.warning(f"Failed to create prefix trace: {e}")
+        # 3.3 创建 Trace 并添加到 target_node 的 traces
+        # 为新节点创建 trace（无论成功与否），用于后续 replay
+        try:
+            # 创建 TrajectoryStep
+            step = TrajectoryStep(
+                action=action,
+                parsed_action=action,
+                thought=thought or "",
+                observation=obs_t1,
+                misc={"hint": hint, "success": success, "source_node": source_node.node_id}
+            )
+            
+            # 创建 Trace
+            start_url = obs_t.get("url", "")
+            end_url = obs_t1.get("url", "")
+            trace = Trace.from_trajectory_steps(
+                steps=[step],
+                start_url=start_url,
+                end_url=end_url,
+                misc={"source_node": source_node.node_id, "target_node": target_node.node_id, "is_new_node": is_new_node}
+            )
+            
+            # 新节点必须添加 trace，已存在的节点如果还没有 trace 也添加
+            if is_new_node:
+                target_node.add_trace(trace)
+                logger.info(f"Created trace for NEW node {target_node.node_id}: {start_url} -> {end_url} (success={success})")
+            elif len(target_node.traces) == 0:
+                target_node.add_trace(trace)
+                logger.info(f"Created trace for existing node {target_node.node_id}: {start_url} -> {end_url} (success={success})")
+        except Exception as e:
+            logger.warning(f"Failed to create trace: {e}")
 
         # 3.4 状态管理
         self.add_to_explored(source_node)
@@ -219,16 +291,20 @@ class Graph:
         # 3.5 移动指针
         self.current_node = target_node
         
+        # 3.6 保存全局信息
+        self._save_graph_info()
+        
         return target_node
-
-    def _update_edge_stats(self, source_id: str, target_id: str, success: bool, target_element: str = None):
+    
+    def _update_edge_stats(self, source_id: str, target_id: str, success: bool, action: str = "", target_element: str = ""):
         """更新边的统计信息 (Success Rate)"""
         key = (source_id, target_id)
         if key not in self.edges:
             self.edges[key] = {
+                "action": action,
+                "target_element": target_element,
                 "success": 0,
-                "total": 0,
-                "target_element": target_element
+                "total": 0
             }
         
         self.edges[key]["total"] += 1
@@ -239,11 +315,23 @@ class Graph:
         self._save_edges()
 
     def _save_edges(self):
-        # JSON 不支持 Tuple key，转换为 "u|v" 字符串格式
-        serializable_edges = {f"{k[0]}|{k[1]}": v for k, v in self.edges.items()}
+        """保存边为数组格式"""
+        edges_array = []
+        for (source_id, target_id), stats in self.edges.items():
+            edges_array.append({
+                "source_node_id": source_id,
+                "target_node_id": target_id,
+                "action": stats.get("action", ""),
+                "target_element": stats.get("target_element", ""),
+                "stats": {
+                    "success": stats.get("success", 0),
+                    "total": stats.get("total", 0)
+                }
+            })
+        
         with open(os.path.join(self.exp_dir, "edges.json"), "w") as f:
-            json.dump(serializable_edges, f, indent=4)
-
+            json.dump(edges_array, f, indent=4)
+    
     # =========================================================
     #  Outputs for Proposer & Solver
     # =========================================================
@@ -277,7 +365,7 @@ class Graph:
         if node not in self.explored_nodes:
             self.explored_nodes.append(node)
             node.visited = True
-            node.update_save(save_prefix=False)
+            node.update_save(save_traces=False, save_info=True)
 
     def get_next_node(self) -> Node | None:
         """获取 Frontier 节点"""
@@ -291,7 +379,7 @@ class Graph:
     # =========================================================
 
     @staticmethod
-    def load(path: str, encoder_fn: Callable, load_steps: bool=True, load_prefixes: bool=True, load_images: bool=True) -> Graph:
+    def load(path: str, encoder_fn: Callable, encoder_name: str = "", load_steps: bool=True, load_traces: bool=True, load_images: bool=True) -> Graph:
         """从硬盘加载图"""
         logger.info(f"Loading graph from {path}")
         
@@ -309,14 +397,16 @@ class Graph:
             
         # 初始化 Graph，必须重新注入 encoder_fn
         graph = Graph(
-            root_url=graph_info.get("root_url", ""), 
+            root_url="",  # 不再需要 root_url
             exp_dir=os.path.dirname(path), 
-            encoder_fn=encoder_fn, 
+            encoder_fn=encoder_fn,
+            encoder_name=encoder_name or graph_info.get("encoder_name", ""),
             similarity_threshold=graph_info.get("similarity_threshold", 0.95),
-            allowlist_patterns=graph_info.get("allowlist_patterns", []),
-            denylist_patterns=graph_info.get("denylist_patterns", []),
             resume=True
         )
+        
+        # 恢复统计信息
+        graph.total_steps = graph_info.get("total_steps", 0)
         
         # 1. 加载 Nodes
         node_dirs = glob.glob(os.path.join(path, "node_*"))
@@ -324,7 +414,7 @@ class Graph:
         for node_dir in node_dirs:
             try:
                 # Node.load 已经适配了新版的 node_id 和 embedding
-                node = Node.load(node_dir, load_steps=load_steps, load_prefix=load_prefixes, load_images=load_images)
+                node = Node.load(node_dir, load_steps=load_steps, load_traces=load_traces, load_images=load_images)
                 graph.nodes[node.node_id] = node 
                 
                 if node.visited:
@@ -334,15 +424,28 @@ class Graph:
             except Exception as e:
                 logger.error(f"Error loading node from {node_dir}: {e}")
         
-        # 2. 加载 Edges
+        # 2. 加载 Edges（新格式：数组）
         edges_path = os.path.join(path, "edges.json")
         if os.path.exists(edges_path):
             try:
                 with open(edges_path, "r") as f:
-                    raw_edges = json.load(f)
-                    # 还原 Tuple Key
+                    edges_array = json.load(f)
+                    
+                # 判断格式：如果是数组则为新格式，否则为旧格式
+                if isinstance(edges_array, list):
+                    # 新格式：数组
+                    for edge in edges_array:
+                        key = (edge["source_node_id"], edge["target_node_id"])
+                        graph.edges[key] = {
+                            "action": edge.get("action", ""),
+                            "target_element": edge.get("target_element", ""),
+                            "success": edge.get("stats", {}).get("success", 0),
+                            "total": edge.get("stats", {}).get("total", 0)
+                        }
+                else:
+                    # 旧格式：对象（向后兼容）
                     graph.edges = {
-                        tuple(k.split("|")): v for k, v in raw_edges.items()
+                        tuple(k.split("|")): v for k, v in edges_array.items()
                     }
             except Exception as e:
                 logger.error(f"Error loading edges: {e}")
@@ -355,5 +458,5 @@ class Graph:
             sorted_ids = sorted(graph.nodes.keys(), key=lambda x: int(x.split('_')[-1]))
             graph.current_node = graph.nodes[sorted_ids[0]]
 
-        logger.info(f"Loaded graph with {len(graph.nodes)} nodes.")
+        logger.info(f"Loaded graph with {len(graph.nodes)} nodes, {graph.total_steps} total steps.")
         return graph

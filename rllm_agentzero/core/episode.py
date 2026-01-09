@@ -40,9 +40,9 @@ def reset_env_to_node(
     
     # 3. 导航逻辑
     # 优先使用 Trace Replay
-    if node.prefixes and len(node.prefixes) > 0:
-        best_trace = node.prefixes[0]
-        logger.info(f"Replaying prefix trace ({len(best_trace)} steps) to reach node: {node.url}...")
+    if node.traces and len(node.traces) > 0:
+        best_trace = node.traces[0]
+        logger.info(f"Replaying trace ({len(best_trace)} steps) to reach node: {node.url}...")
         try:
             # Trace replay 需要直接操作 browser_env (因为它需要 page 对象)
             # 注意: trace.replay 内部如果用了 env.page，传入 browser_env 最稳妥
@@ -55,7 +55,7 @@ def reset_env_to_node(
             browser_env.page.goto(node.url)
     else:
         # 兜底逻辑：直接跳转
-        logger.info(f"No prefix trace found. Navigating directly.")
+        logger.info(f"No trace found. Navigating directly.")
         try:
             browser_env.page.goto(node.url)
             browser_env.page.wait_for_load_state("domcontentloaded", timeout=5000)

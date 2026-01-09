@@ -56,19 +56,29 @@ class Trace:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         
+        # 构建 action_chain
+        action_chain = [step.action for step in self.steps if step.action]
+        
         trace_info = {
-            "start_url": self.start_url,
-            "end_url": self.end_url,
-            "misc": self.misc
+            "trace_id": os.path.basename(save_dir),
+            "start_node_id": self.misc.get("source_node", "") if self.misc else "",
+            "end_node_id": self.misc.get("target_node", "") if self.misc else "",
+            "action_chain": action_chain,
+            "length": len(action_chain),
         }
         
         with open(os.path.join(save_dir, "trace_info.json"), "w") as f:
             json.dump(trace_info, f, indent=4)
         
-        for i, step in enumerate(self.steps):
-            step_save_dir = os.path.join(save_dir, f"step_{i}")
-            os.makedirs(step_save_dir, exist_ok=True)
-            step.save(step_save_dir, keep_image_in_memory=True, save_image=False)
+        # 如果只有一个 step，直接保存在 trace 目录下
+        if len(self.steps) == 1:
+            self.steps[0].save(save_dir, keep_image_in_memory=True, save_image=False)
+        else:
+            # 多个 steps 保存到子目录
+            for i, step in enumerate(self.steps):
+                step_save_dir = os.path.join(save_dir, f"step_{i}")
+                os.makedirs(step_save_dir, exist_ok=True)
+                step.save(step_save_dir, keep_image_in_memory=True, save_image=False)
 
     def load(load_dir: str, load_steps: bool=True, load_images: bool=False):
         with open(os.path.join(load_dir, "trace_info.json"), "r") as f:

@@ -57,10 +57,68 @@ class ExplorerAgent(SolverAgent):
         # Math: A_candidate = {a | VisitCount(S_t, a) < tau}
         visited_actions = []
         if node and hasattr(node, "action_history"):
+            # action_history 现在是 list[str]，需要统计每个动作出现的次数
+            from collections import Counter
+            action_counts = Counter(node.action_history)
             visited_actions = [
-                act for act, count in node.action_history.items() 
+                act for act, count in action_counts.items() 
                 if count >= self.max_repeats
             ]
+        
+        # C. Element-level Exploration Mask（元素级别的探索 Mask）
+        unvisited_elements = []
+        visited_element_bids = []
+        exploration_stats = None
+        
+        # 优先从 node.interactive_elements 获取未访问的元素
+        if node and hasattr(node, 'interactive_elements'):
+            # 使用 node 中已经过滤掉访问过元素的列表（直接使用，不需要转换）
+            unvisited_elements = node.interactive_elements
+            
+            # 获取已访问的元素 IDs
+            visited_element_bids = [
+                elem.get("bid", "") 
+                for elem in (node.interactive_elements_visited if hasattr(node, 'interactive_elements_visited') else [])
+            ]
+            
+            total_elements = len(unvisited_elements) + len(visited_element_bids)
+            exploration_stats = {
+                'total': total_elements,
+                'visited': len(visited_element_bids),
+                'unvisited': len(unvisited_elements),
+                'coverage': len(visited_element_bids) / total_elements if total_elements > 0 else 0.0,
+                'failed': 0
+            }
+            
+            logger.info(f"Element Exploration Stats: "
+                       f"{len(unvisited_elements)} unvisited, "
+                       f"{len(visited_element_bids)} visited, "
+                       f"coverage: {exploration_stats['coverage']:.1%}")
+        elif "interactive_elements" in obs:
+            # 如果 node 没有元素信息，回退到使用观察中的全部元素
+            current_elements = obs["interactive_elements"]
+            
+            unvisited_elements = [
+                {
+                    "bid": elem.get("bid", ""),
+                    "text": elem.get("text", ""),
+                    "role": elem.get("role", "")
+                }
+                for elem in current_elements
+                if elem.get('visible') and elem.get('clickable')
+            ]
+            
+            visited_element_bids = []
+            exploration_stats = {
+                'total': len(unvisited_elements),
+                'visited': 0,
+                'unvisited': len(unvisited_elements),
+                'coverage': 0.0,
+                'failed': 0
+            }
+            
+            logger.info(f"Element Exploration Stats (from obs): "
+                       f"{len(unvisited_elements)} interactive elements available")
 
         current_step = BrowserGymAgentStepData(
             action=None, 
@@ -83,7 +141,10 @@ class ExplorerAgent(SolverAgent):
                 obs=obs,
                 history=self.history,
                 visited_actions=visited_actions,
-                frontier_info=frontier_info
+                frontier_info=frontier_info,
+                unvisited_elements=unvisited_elements,  # 新增：未访问元素
+                visited_element_bids=visited_element_bids,  # 新增：已访问元素 bid
+                exploration_stats=exploration_stats  # 新增：探索统计
             )
 
             try:
@@ -106,23 +167,22 @@ class ExplorerAgent(SolverAgent):
             action, thought = oracle_action
             response_text = f'{{"thought": "{thought}", "action": "{action}"}}'
 
-        logger.info(f"🧭 Explorer: {action}")
+        logger.info(f"Explorer: {action}")
 
-        # === 3. Grounding & Update ===
-        parsed_action = self.action_processor(action) if action else ""
-        
+        # === 3. Update History ===
+        # BrowserGym env.step() will handle action parsing, no need to call action_processor
         current_step.action = action
         current_step.thought = thought
         current_step.misc.update({
             "thought": thought, 
-            "raw_action": action, 
-            "parsed_action": parsed_action,
+            "raw_action": action,
             "visited_actions": visited_actions,
-            "frontier_info": frontier_info
+            "frontier_info": frontier_info,
+            "response_text": response_text
         })
         self.history.append(current_step)
 
-        return parsed_action, current_step.misc
+        return action, current_step.misc
 
     def calculate_reward(self, source_node, target_node, action_str: str, graph) -> float:
         """
@@ -148,7 +208,7 @@ class ExplorerAgent(SolverAgent):
         # Check if target_node is newly created (in unexplored_nodes)
         if target_node in graph.unexplored_nodes:
             r_novelty = 1.0
-            logger.info(f"🎉 [Reward] Novelty Discovery! Node {target_node.node_id}")
+            logger.info(f"[Reward] Novelty Discovery! Node {target_node.node_id}")
         
         # Alternative: Check if this is the first time visiting this node
         # by checking if the edge is new (total == 1)
@@ -174,5 +234,5 @@ class ExplorerAgent(SolverAgent):
         
         total_reward = r_novelty + r_info_gain
         
-        logger.info(f"💰 [Reward] Explore Total: {total_reward:.3f} (Novelty: {r_novelty}, InfoGain: {r_info_gain:.3f})")
+        logger.info(f"[Reward] Explore Total: {total_reward:.3f} (Novelty: {r_novelty}, InfoGain: {r_info_gain:.3f})")
         return total_reward
