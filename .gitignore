@@ -1,5 +1,7 @@
-sft_data_process/data/apurvaga___go-browse-wa-raw
-sft_data_process/data/
+sft_data_process/data/apurvaga___go-browse-wa-raw/
+# ignore all files under the data directory but keep the directory itself so negation works
+sft_data_process/data/*
+!sft_data_process/data/preprocess_data.ipynb
 scripts/parallel_run_indexed_results/
 scripts/webarena.pem
 scripts/help.md
