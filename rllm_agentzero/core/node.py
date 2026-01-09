@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 import json
 import logging
 import os
-import shutil
+from PIL import Image
 import glob
+import re
 import numpy as np
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,50 +19,33 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-def delete_folder_contents(folder_path: str):
-    """Delete all contents of a folder without deleting the folder itself."""
-    if not os.path.exists(folder_path):
-        logger.warning(f"Folder {folder_path} does not exist. Nothing to delete.")
-        return
-    
-    for filename in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-                logger.info(f"Deleted file: {file_path}")
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-                logger.info(f"Deleted directory and its contents: {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to delete {file_path}. Reason: {e}")
-
 @dataclass
 class Node:
-    # ========== 必需字段 (无默认值) ==========
-    node_id: str                    # 唯一标识符 (例如 "node_0")
+    # ========== Required Fields (No Default Value) ==========
+    node_id: str                    # unique identifier
     url: str
-    embedding: list[float] | None   # Vector Embedding for Semantic Matching
+    embedding: list[float] | None  
     hint: str 
     exp_dir: str
     tasks: dict[str, Task]
     exploration_tasks: dict[str, Task]
     children: list[str]             # List of child node_ids
-    traces: list[Trace]             # 到达该节点的路径集合（存储在 traces/ 文件夹）
+    traces: list[Trace]             
 
-    # ========== 可选字段 (有默认值) ==========
-    depth: int = 0                  # 从 Root 到此的最短跳数
-    visit_count: int = 0            # 访问次数
+    # ========== Optional Fields (With Default Value) ==========
+    depth: int = 0                  # minimal steps from root
+    visit_count: int = 0            
     visited: bool = False
-    action_history: list[str] = field(default_factory=list)  # 已尝试过的动作列表
+    action_history: list[str] = field(default_factory=list)  
+    # unexplored elements: [{"bid": "42", "text": "Cart", "role": "button"}]
+    interactive_elements: list[dict] = field(default_factory=list)  
+    interactive_elements_visited: list[dict] = field(default_factory=list)  
     misc: dict | None = None
-    interactive_elements: list[dict] = field(default_factory=list)  # 未探索的元素: [{"id": "42", "text": "Cart", "type": "button"}]
-    interactive_elements_visited: list[dict] = field(default_factory=list)  # 已探索的元素
 
     def __post_init__(self):
         if not os.path.exists(self.exp_dir):
             os.makedirs(self.exp_dir)
-            self.update_save(save_traces=True, save_info=True)
+            self.update_save()
 
     @staticmethod
     def load(load_dir: str, load_steps: bool=True, load_traces: bool=True, load_images: bool=True):
@@ -73,7 +56,6 @@ class Node:
         with open(info_path, "r") as f:
             node_info = json.load(f)
         
-        # 加载 embedding
         embedding = None
         embedding_path = os.path.join(load_dir, "embedding.npy")
         if os.path.exists(embedding_path):
@@ -83,27 +65,18 @@ class Node:
         tasks = {}
         exploration_tasks = {}
 
-        # load micro-tasks
         if visited and os.path.exists(os.path.join(load_dir, "tasks")):
             task_dirs = sorted(glob.glob(os.path.join(load_dir, "tasks", "task_*")), key=lambda x: int(os.path.basename(x).split("_")[-1]))
             for task_dir in task_dirs:
-                try:
-                    task = Task.load(task_dir, load_steps=load_steps, load_images=load_images)
-                    tasks[task.goal] = task
-                except Exception as e:
-                    logger.error(f"Error loading task from {task_dir}: {e}")
+                task = Task.load(task_dir, load_steps=load_steps, load_images=load_images)
+                tasks[task.goal] = task
         
-        # load exploration micro-tasks
         if visited and os.path.exists(os.path.join(load_dir, "exploration_tasks")):
             exploration_task_dirs = sorted(glob.glob(os.path.join(load_dir, "exploration_tasks", "task_*")), key=lambda x: int(os.path.basename(x).split("_")[-1]))
             for task_dir in exploration_task_dirs:
-                try:
-                    task = Task.load(task_dir, load_steps=load_steps, load_images=load_images)
-                    exploration_tasks[task.goal] = task
-                except Exception as e:
-                    logger.error(f"Error loading exploration task from {task_dir}: {e}")
+                task = Task.load(task_dir, load_steps=load_steps, load_images=load_images)
+                exploration_tasks[task.goal] = task
         
-        # load traces（从 traces/ 文件夹）
         traces = []
         traces_dir = os.path.join(load_dir, "traces")
         if load_traces and os.path.exists(traces_dir):
@@ -112,13 +85,9 @@ class Node:
                 key=lambda x: int(os.path.basename(x).split("_")[-1])
             )
             for trace_dir in trace_dirs:
-                try:
-                    trace = Trace.load(trace_dir, load_steps=load_steps, load_images=load_images)
-                    traces.append(trace)
-                except Exception as e:
-                    logger.error(f"Error loading trace from {trace_dir}: {e}")
+                trace = Trace.load(trace_dir, load_steps=load_steps, load_images=load_images)
+                traces.append(trace)
 
-        # 读取新格式字段
         return Node(
             node_id=node_info["node_id"],
             embedding=embedding,
@@ -138,58 +107,62 @@ class Node:
             misc=node_info.get("misc", None)
         )
 
-    def update_save(self, save_traces=False, save_info=True, save_screenshot=False, screenshot=None):
-        if save_info:
-            node_info = {
-                "node_id": self.node_id,
-                "url": self.url,
-                
-                # Graph structure
-                "depth": self.depth,
-                "visit_count": self.visit_count,
-                "children": self.children,
-                
-                # Interactive space
-                "interactive_elements": self.interactive_elements,
-                "interactive_elements_visited": self.interactive_elements_visited,
-                "action_history": self.action_history,
-                
-                # Metadata
-                "hint": self.hint,
-                "visited": self.visited,
-                "misc": self.misc
-            }
-            with open(os.path.join(self.exp_dir, "node_info.json"), "w") as f:
-                json.dump(node_info, f, indent=4)
-        
-        # 保存 embedding 到单独的 .npy 文件
+    def update_save(self,save_screenshot=False, screenshot:np.ndarray|None = None):
+        node_info = {
+            "node_id": self.node_id,
+            "url": self.url,
+            
+            # Graph structure
+            "depth": self.depth,
+            "visit_count": self.visit_count,
+            "children": self.children,
+            
+            # Interactive space
+            "interactive_elements": self.interactive_elements,
+            "interactive_elements_visited": self.interactive_elements_visited,
+            "action_history": self.action_history,
+            
+            # Metadata
+            "hint": self.hint,
+            "visited": self.visited,
+            "misc": self.misc
+        }
+        with open(os.path.join(self.exp_dir, "node_info.json"), "w") as f:
+            json.dump(node_info, f, indent=4)
         if self.embedding:
             np.save(os.path.join(self.exp_dir, "embedding.npy"), np.array(self.embedding))
-        
-        # 保存截图
         if save_screenshot and screenshot is not None:
-            from PIL import Image
-            if isinstance(screenshot, np.ndarray):
-                img = Image.fromarray(screenshot)
-                img.save(os.path.join(self.exp_dir, "screenshot.png"))
-        
-        if save_traces:
-            # 使用 traces/ 文件夹
-            traces_dir = os.path.join(self.exp_dir, "traces")
-            os.makedirs(traces_dir, exist_ok=True)
-            delete_folder_contents(traces_dir)
-            
-            # 保存所有 traces
-            for i, trace in enumerate(self.traces):
-                trace_save_dir = os.path.join(traces_dir, f"trace_{i}")
-                os.makedirs(trace_save_dir, exist_ok=True)
-                trace.save(trace_save_dir)
+            Image.fromarray(screenshot).save(os.path.join(self.exp_dir, "screenshot.png"))
     
     def record_action(self, action: str):
-        """记录已尝试的动作"""
+        """
+            record_action records an action taken by the agent on the node.
+            Find and move the element from unvisited to visited
+        """
+        match = re.search(r"['\"](.*?)['\"]", action)
+        bid = match.group(1) if match else None
+
         self.action_history.append(action)
         self.visit_count += 1
-        self.update_save(save_traces=False, save_info=True)
+        
+        if bid:
+            element = next((e for e in self.interactive_elements if e.get("bid") == bid), None)
+            if element:
+                self.interactive_elements.remove(element)
+                self.interactive_elements_visited.append(element)
+                logger.info(f"Moved element bid={bid} from unvisited to visited in node {self.node_id}")
+            else:
+                logger.warning(f"Element bid={bid} not found in interactive_elements of node {self.node_id} (may have been filtered out)")
+                already_visited = any(e.get("bid") == bid for e in self.interactive_elements_visited)
+                if not already_visited:
+                    self.interactive_elements_visited.append({
+                        "bid": bid,
+                        "text": "",
+                        "role": "unknown"
+                    })
+                    logger.info(f"Added placeholder for element bid={bid} to visited list")
+        
+        self.update_save()
 
     def add_task(self, goal: str, instruction: str = "", target_edge: dict = None, task_misc: dict = None) -> Task:
         if target_edge is None:
@@ -206,9 +179,7 @@ class Node:
         task.add_trajectory(traj)
 
     def add_trace(self, trace: Trace):
-        """添加一个 trace 到节点的 traces 列表"""
         self.traces.append(trace)
-        # 立即保存
         trace_save_dir = os.path.join(self.exp_dir, "traces", f"trace_{len(self.traces) - 1}")
         os.makedirs(trace_save_dir, exist_ok=True)
         trace.save(trace_save_dir)
@@ -227,17 +198,10 @@ class Node:
         task = self.add_exploration_task(traj.goal)
         task.add_trajectory(traj)
     
-    # ========== Element-level Tracking Methods ==========
-    
     def register_elements(self, elements: list[dict]):
         """
-        注册页面上的可交互元素（首次访问节点时调用）
-        
-        Args:
-            elements: 元素列表，已经过滤为可见且可点击的元素
-                      格式 [{"bid": "123", "role": "button", "text": "...", "visible": True, "clickable": True}]
+            register_elements registers the interactive elements on the page (called when first visiting the node)
         """
-        # 使用验证好的过滤条件
         filtered_elements = [
             {
                 "bid": item.get("bid", ""),
@@ -247,7 +211,6 @@ class Node:
             for item in elements 
             if item.get('visible') and item.get('clickable')
         ]
-        
         self.interactive_elements = filtered_elements
         logger.info(f"Registered {len(filtered_elements)} interactive elements for node {self.node_id}")
-        self.update_save(save_traces=False, save_info=True)
+        self.update_save()

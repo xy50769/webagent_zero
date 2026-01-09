@@ -425,7 +425,7 @@ class ExplorerTester:
                                 source_node_for_element_tracking.interactive_elements_visited.append(visited_elem)
                                 source_node_for_element_tracking.interactive_elements.pop(i)
                                 break
-                        source_node_for_element_tracking.update_save(save_traces=False, save_info=True)
+                        source_node_for_element_tracking.update_save(save_info=True)
                 
                 new_node = self.graph.process_transition(
                     obs_t=processed_obs,

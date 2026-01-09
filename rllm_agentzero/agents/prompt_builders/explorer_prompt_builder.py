@@ -49,11 +49,9 @@ class ExplorerPromptBuilder(SolverPromptBuilder):
         goal: str, 
         obs: dict, 
         history: list, 
-        visited_actions: list = None,
         frontier_info: dict = None,
-        unvisited_elements: list = None,  # 新增：未访问的元素
-        visited_element_bids: list = None,  # 新增：已访问的元素 bid
-        exploration_stats: dict = None  # 新增：探索统计
+        unvisited_elements: list = None,  
+        visited_elements: list = None
     ) -> list[dict]:
         """
         Build prompt with Exploration Mask and Frontier Info
@@ -76,90 +74,32 @@ class ExplorerPromptBuilder(SolverPromptBuilder):
                 f"Target URL: {frontier_info.get('url', 'Unknown')}\n"
                 f"Hint: Try to perform actions that might lead towards this area or similar unexplored states."
             )
-            
-            # Append to last user message
-            if messages and messages[-1]['role'] == 'user':
-                last_content = messages[-1]['content']
-                if isinstance(last_content, list):
-                    # If content is a list, append as new text item
-                    messages[-1]['content'].append({
-                        "type": "text",
-                        "text": frontier_msg
-                    })
-                elif isinstance(last_content, str):
-                    # If content is a string, append directly
-                    messages[-1]['content'] += frontier_msg
+            messages[-1]['content'] += frontier_msg
 
-        # 3. Inject Element-level Exploration Guidance（元素级别探索引导）
+        # 3. Inject Element-level Exploration Guidance
         if unvisited_elements and len(unvisited_elements) > 0:
             element_guidance = "\n\n### Unvisited Elements (PRIORITIZE THESE)\n"
             element_guidance += "The following elements on this page have NOT been interacted with yet:\n\n"
             
             for i, elem in enumerate(unvisited_elements[:]):
                 element_guidance += f"  - bid='{elem['bid']}' [{elem['role']}]: \"{elem['text'][:60]}\"\n"
-            
-            
-            # 添加探索统计
-            if exploration_stats:
-                element_guidance += (
-                    f"\nCurrent Page Coverage: {exploration_stats['visited']}/{exploration_stats['total']} "
-                    f"({exploration_stats['coverage']*100:.1f}%)\n"
-                )
-            
+
             element_guidance += (
                 "\n**EXPLORATION STRATEGY**: Please select the element from the unvisited elements above that you think is most likely to reach the new state and interact with it.\n"
             )
-            
-            if messages and messages[-1]['role'] == 'user':
-                last_content = messages[-1]['content']
-                if isinstance(last_content, list):
-                    messages[-1]['content'].append({
-                        "type": "text",
-                        "text": element_guidance
-                    })
-                elif isinstance(last_content, str):
-                    messages[-1]['content'] += element_guidance
+            messages[-1]['content'] += element_guidance
         
         # 4. Inject Exploration Mask (Visited Elements Warning)
-        if visited_element_bids and len(visited_element_bids) > 0:
+        if visited_elements and len(visited_elements) > 0:
             mask_msg = (
                 f"\n\n### Already Explored Elements (Avoid Unless Necessary)\n"
-                f"These {len(visited_element_bids)} elements have been interacted with: "
-                f"{visited_element_bids[:20]}"
+                f"These {len(visited_elements)} elements have been interacted with: "
+                f"{visited_elements[:20]}"
             )
-            
-            if len(visited_element_bids) > 20:
-                mask_msg += f" ... and {len(visited_element_bids) - 20} more."
             
             mask_msg += "\nPrefer unvisited elements to maximize exploration efficiency.\n"
-            
-            if messages and messages[-1]['role'] == 'user':
-                last_content = messages[-1]['content']
-                if isinstance(last_content, list):
-                    messages[-1]['content'].append({
-                        "type": "text",
-                        "text": mask_msg
-                    })
-                elif isinstance(last_content, str):
-                    messages[-1]['content'] += mask_msg
+            messages[-1]['content'] += mask_msg
         
-        # 5. Legacy action-level mask (keep for compatibility)
-        if visited_actions:
-            mask_msg = (
-                f"\n\n### Exploration History\n"
-                f"Repeated actions on this page: {visited_actions[-10:]} (showing last 10)\n"
-            )
-            
-            if messages and messages[-1]['role'] == 'user':
-                last_content = messages[-1]['content']
-                if isinstance(last_content, list):
-                    messages[-1]['content'].append({
-                        "type": "text",
-                        "text": mask_msg
-                    })
-                elif isinstance(last_content, str):
-                    messages[-1]['content'] += mask_msg
-            
         return messages
 
     def cot_examples(self) -> list[dict]:

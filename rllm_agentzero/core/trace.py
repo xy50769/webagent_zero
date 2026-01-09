@@ -63,8 +63,11 @@ class Trace:
             "trace_id": os.path.basename(save_dir),
             "start_node_id": self.misc.get("source_node", "") if self.misc else "",
             "end_node_id": self.misc.get("target_node", "") if self.misc else "",
+            "start_url": self.start_url,
+            "end_url": self.end_url,
             "action_chain": action_chain,
             "length": len(action_chain),
+            "misc": self.misc if self.misc else {}
         }
         
         with open(os.path.join(save_dir, "trace_info.json"), "w") as f:
@@ -93,7 +96,11 @@ class Trace:
         else: 
             steps = os.listdir(load_dir)
         
-        return Trace(steps, trace_info["start_url"], trace_info["end_url"], trace_info["misc"])
+        start_url = trace_info.get("start_url", "")
+        end_url = trace_info.get("end_url", "")
+        misc = trace_info.get("misc", {})
+        
+        return Trace(steps, start_url, end_url, misc)
     
     def __len__(self):
         return len(self.steps)

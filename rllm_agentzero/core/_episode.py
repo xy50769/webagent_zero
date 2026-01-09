@@ -1,4 +1,4 @@
-from .evaluator import Evaluator
+from ._evaluator import Evaluator
 from .graph import Graph
 from .node import Node
 from .trajectory import Trajectory, TrajectoryStep

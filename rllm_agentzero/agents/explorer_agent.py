@@ -1,11 +1,21 @@
 import logging
+import json
 import numpy as np
+from collections import Counter
+from browsergym.core.action.highlevel import HighLevelActionSet
 from .base_agent import AgentFactory
 from .solver_agent import SolverAgent, extract_action_and_thought
 from .prompt_builders.explorer_prompt_builder import ExplorerPromptBuilder 
 from .trajectory_data import BrowserGymAgentStepData
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 @AgentFactory.register
 class ExplorerAgent(SolverAgent):
@@ -22,13 +32,18 @@ class ExplorerAgent(SolverAgent):
     def __init__(
         self, 
         model_id: str, 
-        max_repeats: int = 3,
+        temperature: float = 0.1,
         **kwargs
     ):
-        super().__init__(model_id=model_id, **kwargs)
-        
+        super().__init__(model_id=model_id, temperature=temperature, **kwargs)
+
+        self.action_set = HighLevelActionSet(
+            subsets=["chat", "bid", "infeas", "nav", "tab"],
+            strict=False,
+            multiaction=False,
+            demo_mode=self.demo_mode,
+        )
         self.prompt_builder = ExplorerPromptBuilder(self.action_set)
-        self.max_repeats = max_repeats 
         self._goal = "Explore the website to maximize state coverage. Find new pages and interaction states. Focus on elements that haven't been visited yet."
 
     def get_action(self, obs: dict, oracle_action=None, node=None, graph=None, **kwargs) -> tuple[str, dict]:
@@ -45,80 +60,29 @@ class ExplorerAgent(SolverAgent):
         
         # A. Get Frontier info
         frontier_info = None
-        if graph:
-            frontier_node = graph.get_next_node()
-            if frontier_node:
-                frontier_info = {
-                    "node_id": frontier_node.node_id,
-                    "url": getattr(frontier_node, 'url', ''),
-                }
-
-        # B. Candidate Filtering (Mask M_t)
-        # Math: A_candidate = {a | VisitCount(S_t, a) < tau}
-        visited_actions = []
-        if node and hasattr(node, "action_history"):
-            # action_history 现在是 list[str]，需要统计每个动作出现的次数
-            from collections import Counter
-            action_counts = Counter(node.action_history)
-            visited_actions = [
-                act for act, count in action_counts.items() 
-                if count >= self.max_repeats
-            ]
+        if graph and node and not node.interactive_elements and graph.get_next_node():
+            frontier_info = {
+                "node_id":  graph.get_next_node().node_id,
+                "url": getattr( graph.get_next_node(), 'url', ''),
+            }
         
-        # C. Element-level Exploration Mask（元素级别的探索 Mask）
+        # B. Element-level Exploration Mask
         unvisited_elements = []
-        visited_element_bids = []
-        exploration_stats = None
-        
-        # 优先从 node.interactive_elements 获取未访问的元素
-        if node and hasattr(node, 'interactive_elements'):
-            # 使用 node 中已经过滤掉访问过元素的列表（直接使用，不需要转换）
-            unvisited_elements = node.interactive_elements
-            
-            # 获取已访问的元素 IDs
-            visited_element_bids = [
+        visited_elements = []
+        if node:
+            unvisited_elements = node.interactive_elements or []
+            visited_elements = [
                 elem.get("bid", "") 
                 for elem in (node.interactive_elements_visited if hasattr(node, 'interactive_elements_visited') else [])
             ]
-            
-            total_elements = len(unvisited_elements) + len(visited_element_bids)
-            exploration_stats = {
-                'total': total_elements,
-                'visited': len(visited_element_bids),
-                'unvisited': len(unvisited_elements),
-                'coverage': len(visited_element_bids) / total_elements if total_elements > 0 else 0.0,
-                'failed': 0
-            }
-            
-            logger.info(f"Element Exploration Stats: "
-                       f"{len(unvisited_elements)} unvisited, "
-                       f"{len(visited_element_bids)} visited, "
-                       f"coverage: {exploration_stats['coverage']:.1%}")
-        elif "interactive_elements" in obs:
-            # 如果 node 没有元素信息，回退到使用观察中的全部元素
-            current_elements = obs["interactive_elements"]
-            
-            unvisited_elements = [
-                {
-                    "bid": elem.get("bid", ""),
-                    "text": elem.get("text", ""),
-                    "role": elem.get("role", "")
-                }
-                for elem in current_elements
-                if elem.get('visible') and elem.get('clickable')
-            ]
-            
-            visited_element_bids = []
-            exploration_stats = {
-                'total': len(unvisited_elements),
-                'visited': 0,
-                'unvisited': len(unvisited_elements),
-                'coverage': 0.0,
-                'failed': 0
-            }
-            
-            logger.info(f"Element Exploration Stats (from obs): "
-                       f"{len(unvisited_elements)} interactive elements available")
+        else:
+            unvisited_elements = obs.get("interactive_elements", [])
+            visited_elements = []
+
+        
+        logger.info(f"Element Exploration Stats: "
+                    f"{len(unvisited_elements)} unvisited, "
+                    f"{len(visited_elements)} visited")
 
         current_step = BrowserGymAgentStepData(
             action=None, 
@@ -128,7 +92,7 @@ class ExplorerAgent(SolverAgent):
             misc={}
         )
 
-        response_text = ""
+        raw_output = ""
         action = ""
         thought = ""
 
@@ -140,32 +104,40 @@ class ExplorerAgent(SolverAgent):
                 goal=self._goal,
                 obs=obs,
                 history=self.history,
-                visited_actions=visited_actions,
                 frontier_info=frontier_info,
-                unvisited_elements=unvisited_elements,  # 新增：未访问元素
-                visited_element_bids=visited_element_bids,  # 新增：已访问元素 bid
-                exploration_stats=exploration_stats  # 新增：探索统计
+                unvisited_elements=unvisited_elements,
+                visited_elements=visited_elements,
             )
-
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=messages,
-                    temperature=1.0, 
-                    max_tokens=1024
-                )
-                response_text = response.choices[0].message.content
-                
-                if response.usage:
-                    current_step.misc["model_usage"] = response.usage.model_dump()
-            except Exception as e:
-                logger.error(f"Explorer Inference Error: {e}")
-                
-            thought, action = extract_action_and_thought(response_text)
+            
+            self._record_prompt(messages, len(self.history) + 1)
+            
+            for attempt in range(self.max_retries):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model_id,
+                        messages=messages,
+                        temperature=self.temperature, 
+                        max_tokens=2048
+                    )
+                    raw_output = response.choices[0].message.content
+                    thought, action = extract_action_and_thought(raw_output)
+                    
+                    self._record_response(raw_output, thought, action, len(self.history) + 1)
+                    if action and action.strip():
+                        if response.usage:
+                            current_step.misc["model_usage"] = response.usage.model_dump()
+                        break
+                    else:
+                        logger.warning(f"Attempt {attempt + 1}: Failed to extract action. Retrying...")
+                except Exception as e:
+                    logger.error(f"Explorer Inference Error: {e}")
+                    if attempt == self.max_retries - 1:
+                        thought = f"Error after {self.max_retries} retries: {e}"
+                        action = "report_infeasible('Model failed to generate a valid action after multiple retries.')"
             
         else:
             action, thought = oracle_action
-            response_text = f'{{"thought": "{thought}", "action": "{action}"}}'
+            raw_output = json.dumps({"thought": thought, "action": action})
 
         logger.info(f"Explorer: {action}")
 
@@ -176,9 +148,8 @@ class ExplorerAgent(SolverAgent):
         current_step.misc.update({
             "thought": thought, 
             "raw_action": action,
-            "visited_actions": visited_actions,
-            "frontier_info": frontier_info,
-            "response_text": response_text
+            "raw_output": raw_output,
+            "frontier_info": frontier_info
         })
         self.history.append(current_step)
 

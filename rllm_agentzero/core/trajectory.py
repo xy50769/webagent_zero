@@ -8,6 +8,7 @@ def _extract_text_obs(observation):
     """
     Recursively extract all JSON-serializable observations from a nested structure.
     Filters out non-serializable types like numpy arrays, images, etc.
+    Compared to the original code, this will save all textual obs
     """
     # Basic JSON-serializable types
     if isinstance(observation, (str, int, float, bool)) or observation is None:

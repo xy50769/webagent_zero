@@ -7,23 +7,25 @@ from .base_agent import AgentFactory, BaseAgent
 from .prompt_builders.solver_prompt_builder import SolverPromptBuilder
 from .trajectory_data import BrowserGymAgentStepData
 from browsergym.core.action.highlevel import HighLevelActionSet
-from browsergym.utils.obs import flatten_axtree_to_str
+from browsergym.utils.obs import flatten_axtree_to_str,flatten_dom_to_str, prune_html
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 def extract_action_and_thought(raw_string):
-    """提取 Thought 和 Action (保持原样)"""
+    """Extract Thought and Action from raw string"""
     thought = ""
     action = ""
     
     try:
-        # 1. JSON 格式优先
-        # 先去除前后空白
         raw_string = raw_string.strip()
-        
-        # 尝试直接解析整个字符串（如果以 { 开头）
         if raw_string.startswith('{'):
             try:
                 data = json.loads(raw_string)
@@ -34,7 +36,6 @@ def extract_action_and_thought(raw_string):
             except json.JSONDecodeError:
                 pass
         
-        # 尝试查找 JSON 对象
         json_match = re.search(r'\{.*\}', raw_string, re.DOTALL)
         if json_match:
             try:
@@ -47,7 +48,6 @@ def extract_action_and_thought(raw_string):
             except json.JSONDecodeError as e:
                 logger.debug(f"JSON decode failed: {e}, trying text format")
         
-        # 2. 文本格式兜底
         t_match = re.search(r'Thought:\s*(.*?)(?=Action:|$)', raw_string, re.DOTALL | re.IGNORECASE)
         if t_match:
             thought = t_match.group(1).replace('\\"', '"').strip()
@@ -56,8 +56,7 @@ def extract_action_and_thought(raw_string):
         if a_match:
             action = a_match.group(1).replace('\\"', '"').strip()
         elif not action and re.search(r'(click|type|scroll|goto|go_back)\(', raw_string):
-             # 容错：如果直接输出代码没有 Action: 前缀
-             action = raw_string.strip()
+            action = raw_string.strip()
 
     except Exception as e:
         logger.warning(f"Error parsing string: {e}")
@@ -68,19 +67,19 @@ def extract_action_and_thought(raw_string):
 class SolverAgent(BaseAgent):
     """
     [RLLM Solver Agent]
-    集成 Consistency Reward 和 Efficiency Penalty 的执行器。
+    Assemble the consistency reward and efficiency penalty into a single agent.
     """
 
     def __init__(
             self,
-            model_id: str = "rllm-model",
-            base_url: str = "http://127.0.0.1:6006/v1",
-            api_key: str = "EMPTY",
-            temperature: float = 0.01,
+            model_id: str | None = None,
+            base_url: str | None = None,
+            api_key: str | None = None,
+            temperature: float = 1.0,
             char_limit: int = 16000,
             demo_mode: str = 'off',
-            
-            # [新增] 奖励超参数
+            max_retries: int = 3,
+            debug_mode: str = 'off',
             consistency_weight: float = 1.0,
             efficiency_penalty: float = 0.05,
             **kwargs
@@ -90,8 +89,9 @@ class SolverAgent(BaseAgent):
         self.model_id = model_id
         self.temperature = temperature
         self.char_limit = char_limit
-        
-        # RL 参数
+        self.max_retries = max_retries
+        self.demo_mode = demo_mode
+        self.debug_mode = debug_mode
         self.consistency_weight = consistency_weight
         self.efficiency_penalty = efficiency_penalty
 
@@ -101,7 +101,7 @@ class SolverAgent(BaseAgent):
             subsets=["chat", "bid", "infeas", "nav"],
             strict=False,
             multiaction=False,
-            demo_mode=demo_mode
+            demo_mode=self.demo_mode
         )
 
         self.prompt_builder = SolverPromptBuilder(self.action_set)
@@ -110,28 +110,61 @@ class SolverAgent(BaseAgent):
     def reset(self):
         self.history.clear()
 
+    def _record_prompt(self, messages: list[dict], step_count: int):
+        if self.debug_mode != "off":
+            output = []
+            output.append("\n" + "=" * 100)
+            output.append(f"PROMPT FOR STEP {step_count}")
+            output.append("=" * 100)
+            
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                output.append(f"\n[{role.upper()}]")
+                output.append(content)
+            
+            output.append("=" * 100)
+            logger.info("\n".join(output))
+
+    def _record_response(self, response_text: str, thought: str, action: str, step_count: int):
+        if self.debug_mode != "off":
+            output = []
+            output.append("\n" + "=" * 100)
+            output.append(f"LLM RESPONSE FOR STEP {step_count}")
+            output.append("=" * 100)
+            
+            output.append("\n[FULL RAW RESPONSE]")
+            output.append(response_text)
+            
+            output.append("\n" + "-" * 100)
+            output.append("[PARSED OUTPUT]")
+            output.append(f"Thought: {thought}")
+            output.append(f"Action: {action}")
+            output.append("=" * 100)
+            
+            logger.info("\n".join(output))
+
     def obs_preprocessor(self, obs: dict) -> dict:
         """
-        预处理观测，同时提取用于奖励计算的 Target 信息
+        Preprocess observation, extracting target information for reward calculation
         """
-        # 注意：外层循环(Main Loop)需要负责将 target_info 注入到 obs['misc'] 或 obs 本身中
-        target_info = obs.get("target_info", {}) 
         
         return {
-            # 基础信息
-            "goal_object": obs.get("goal_object", [{"text": "Follow instructions."}]),
-            "axtree_txt": flatten_axtree_to_str(
-                obs["axtree_object"], 
-                filter_visible_only=False, 
-                extra_properties=obs.get("extra_element_properties", {})
-            ),
-            "last_action_error": obs.get("last_action_error", ""),
-            "open_pages_urls": obs.get("open_pages_urls", []),
-            
-            # [新增] 关键信息传递
-            "target_info": target_info,  # Proposer 指定的目标 (用于 Consistency Reward)
-            "step_count": obs.get("step_count", len(self.history)), # 当前步数 (用于 Efficiency Penalty)
-            "extra_element_properties": obs.get("extra_element_properties", {}),
+            "chat_messages": obs["chat_messages"],
+            "screenshot": obs["screenshot"],
+            "goal_object": obs["goal_object"],
+            "last_action": obs["last_action"],
+            "last_action_error": obs["last_action_error"],
+            "open_pages_urls": obs["open_pages_urls"],
+            "open_pages_titles": obs["open_pages_titles"],
+            "active_page_index": obs["active_page_index"],
+            "axtree_txt": flatten_axtree_to_str(obs["axtree_object"], filter_visible_only=False, extra_properties=obs["extra_element_properties"]),
+            "axtree_visible_only_txt": flatten_axtree_to_str(obs["axtree_object"], filter_visible_only=True, extra_properties=obs["extra_element_properties"]),
+            "pruned_html": prune_html(flatten_dom_to_str(obs["dom_object"])),
+            "extra_element_properties": obs["extra_element_properties"],
+            # New
+            "target_info": obs.get("target_info", {}),  # Proposer target for Consistency Reward
+            "step_count": obs.get("step_count", len(self.history)), # Current step count for Efficiency Penalty
         }
     
     def action_processor(self, action: str) -> str:
@@ -142,48 +175,33 @@ class SolverAgent(BaseAgent):
         return result
 
     def _extract_target_id_from_action(self, action_str: str) -> Optional[str]:
-        """
-        辅助函数：从动作字符串中提取操作对象的 Element ID。
-        例如: "click('45')" -> "45"
-        """
-        if not action_str:
-            return None
-        # 匹配 click('123') 或 type('123', ...) 中的数字 ID
-        match = re.search(r"['\"](\d+)['\"]", action_str)
-        if match:
+        if action_str and (match := re.search(r"['\"](\d+)['\"]", action_str)):
             return match.group(1)
         return None
 
     def _verify_target_consistency(self, action_id: str, target_desc: str, axtree_txt: str) -> float:
-        """
-        增强版 Consistency Check
-        检查 action_id 对应的 AxTree 节点文本是否包含 target_desc 的关键词
-        """
         if not action_id or not target_desc:
             return 0.0
             
-        # 1. 在 AxTree 文本中定位 ID
-        # AxTree 格式通常是: [ID] Role "Name"
         pattern = re.compile(fr"\[{re.escape(action_id)}\]\s*(.+)")
         match = pattern.search(axtree_txt)
         
         if not match:
-            return 0.0  # 没找到 ID，可能是幻觉
+            return 0.0  
             
         element_line = match.group(1).lower()
-        target_keywords = [w.lower() for w in target_desc.split() if len(w) > 2]  # 过滤短词
+        target_keywords = [w.lower() for w in target_desc.split() if len(w) > 2]  
         
         if not target_keywords:
             return 0.0
-        
-        # 2. 关键词匹配
+
         matches = sum(1 for word in target_keywords if word in element_line)
         match_rate = matches / len(target_keywords) if target_keywords else 0
         
         if match_rate > 0.6:
-            return 1.0  # Strong Match
+            return 1.0 
         elif match_rate > 0.3:
-            return 0.5  # Weak Match
+            return 0.5  
             
         return 0.0
 
@@ -191,9 +209,6 @@ class SolverAgent(BaseAgent):
         """
         计算 Agent 内部的 Dense Reward (Consistency & Efficiency)
         注意：Outcome Reward (成败) 通常由环境在 Episode 结束时给出，这里只计算过程奖励。
-        
-        Returns:
-            total_inner_reward, info_dict
         """
         # 1. Efficiency Penalty
         r_efficiency = -self.efficiency_penalty * step_count
@@ -204,7 +219,6 @@ class SolverAgent(BaseAgent):
         action_id = self._extract_target_id_from_action(raw_action)
         
         if target_element_desc and action_id:
-            # 调用增强版验证逻辑
             match_score = self._verify_target_consistency(action_id, target_element_desc, axtree_txt)
             r_consistency = self.consistency_weight * match_score
         
@@ -231,33 +245,41 @@ class SolverAgent(BaseAgent):
         raw_output = ""
 
         if oracle_action is None:
-            # === LLM Generation ===
-            try:
-                # 1. Prompt Construction
-                messages = self.prompt_builder.build_messages(
-                    goal=obs["goal_object"][0]["text"],
-                    current_step=current_step,
-                    history=self.history,
-                    char_limit=self.char_limit
-                )['prompt']
+            for attempt in range(self.max_retries):
+                try:
+                    messages = self.prompt_builder.build_messages(
+                        goal=obs["goal_object"][0]["text"],
+                        current_step=current_step,
+                        history=self.history,
+                        char_limit=self.char_limit
+                    )['prompt']
 
-                # 2. Inference
-                response = self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=1024
-                )
+                    self._record_prompt(messages, len(self.history) + 1)
+
+                    response = self.client.chat.completions.create(
+                        model=self.model_id,
+                        messages=messages,
+                        temperature=self.temperature, 
+                        max_tokens=2048
+                    )
+                    
+                    raw_output = response.choices[0].message.content
+                    thought, action = extract_action_and_thought(raw_output)
+                    
+                    self._record_response(raw_output, thought, action, len(self.history) + 1)
+                    
+                    if action and action.strip():
+                        if response.usage:
+                            current_step.misc["model_usage"] = response.usage.model_dump()
+                        break 
+                    else:
+                        logger.warning(f"Attempt {attempt + 1}: Failed to extract action. Retrying...")
                 
-                raw_output = response.choices[0].message.content
-                thought, action = extract_action_and_thought(raw_output)
-                
-                if response.usage:
-                    current_step.misc["model_usage"] = response.usage.model_dump()
-            
-            except Exception as e:
-                logger.error(f"Inference Error: {e}")
-                thought = f"Error: {e}"
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1} Inference Error: {e}")
+                    if attempt == self.max_retries - 1:
+                        thought = f"Error after {self.max_retries} retries: {e}"
+                        action = "report_infeasible('Model failed to generate a valid action after multiple retries.')"
         
         else:
             action, thought = oracle_action
@@ -268,7 +290,7 @@ class SolverAgent(BaseAgent):
         # === BrowserGym env.step() will handle action parsing ===
         # No need to call action_processor here
 
-        # === [核心] 计算奖励 ===
+        # === Calculate Inner Reward ===
         inner_reward, reward_details = self._calculate_inner_reward(
             raw_action=action,
             target_info=obs.get("target_info", {}),
@@ -283,13 +305,11 @@ class SolverAgent(BaseAgent):
             "thought": thought, 
             "raw_action": action,
             "raw_output": raw_output,
-            # [新增] 奖励信息
             "inner_reward": inner_reward,
             "reward_details": reward_details,
-            "target_info_snapshot": obs.get("target_info", {})  # 记录当步的目标，方便调试
+            "target_info_snapshot": obs.get("target_info", {})
         })
         
         self.history.append(current_step)
 
-        # 返回 action 给 BrowserGym 环境执行（环境会自动解析）
         return action, current_step.misc

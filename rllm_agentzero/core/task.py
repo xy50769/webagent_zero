@@ -10,9 +10,9 @@ logger.setLevel(logging.INFO)
 
 @dataclass
 class Task:
-    goal: str
-    instruction: str   # [新增] Proposer 生成的指令
-    target_edge: dict  # [新增] 目标边信息
+    goal: str # global target
+    instruction: str   # local target
+    target_edge: dict 
     positive_trajs: list[Trajectory]
     negative_trajs: list[Trajectory]
     exp_dir: str
@@ -24,7 +24,6 @@ class Task:
             os.makedirs(os.path.join(self.exp_dir, "positive_trajs"))
             os.makedirs(os.path.join(self.exp_dir, "negative_trajs"))
             
-            # [修正 1] 保存时包含 instruction 和 target_edge
             task_info = {
                 "goal": self.goal,
                 "instruction": self.instruction,
@@ -66,34 +65,24 @@ class Task:
         with open(info_path, "r") as f:
             task_info = json.load(f)
         
-        # 加载正例
         positive_trajs = []
-        pos_dir = os.path.join(load_dir, "positive_trajs")
-        if os.path.exists(pos_dir):
-            # 按数字排序防止乱序
-            for i in sorted(os.listdir(pos_dir), key=lambda x: int(x) if x.isdigit() else 9999):
-                traj_load_dir = os.path.join(pos_dir, i)
-                if os.path.isdir(traj_load_dir):
-                    positive_trajs.append(Trajectory.load(traj_load_dir, load_steps=load_steps, load_images=load_images))
+        for i in range(len(os.listdir(os.path.join(load_dir, "positive_trajs")))):
+            traj_load_dir = os.path.join(load_dir, "positive_trajs", f"{i}")
+            positive_trajs.append(Trajectory.load(traj_load_dir, load_steps=load_steps, load_images=load_images))
         
-        # 加载负例
         negative_trajs = []
-        neg_dir = os.path.join(load_dir, "negative_trajs")
-        if os.path.exists(neg_dir):
-            for i in sorted(os.listdir(neg_dir), key=lambda x: int(x) if x.isdigit() else 9999):
-                traj_load_dir = os.path.join(neg_dir, i)
-                if os.path.isdir(traj_load_dir):
-                    negative_trajs.append(Trajectory.load(traj_load_dir, load_steps=load_steps, load_images=load_images))
+        for i in range(len(os.listdir(os.path.join(load_dir, "negative_trajs")))):
+            traj_load_dir = os.path.join(load_dir, "negative_trajs", f"{i}")
+            negative_trajs.append(Trajectory.load(traj_load_dir, load_steps=load_steps, load_images=load_images))
         
-        # [修正 2] 按照 Dataclass 的定义顺序传参，并增加默认值防止旧数据报错
         return Task(
             goal=task_info["goal"],
-            instruction=task_info.get("instruction", ""), # 防止旧数据没有这个字段
-            target_edge=task_info.get("target_edge", {}), # 防止旧数据没有这个字段
+            instruction=task_info["instruction"], 
+            target_edge=task_info,
             positive_trajs=positive_trajs,
             negative_trajs=negative_trajs,
             exp_dir=load_dir,
-            misc=task_info.get("misc")
+            misc=task_info["misc"]
         )
     
     @staticmethod
@@ -120,5 +109,4 @@ class Task:
         if tags:
             misc["tags"] = tags
         
-        # 这里顺序是对的
         return Task(goal, instruction, target_edge, [], [], exp_dir, misc)
