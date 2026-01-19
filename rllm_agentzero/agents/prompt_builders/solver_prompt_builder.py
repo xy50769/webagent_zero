@@ -136,19 +136,18 @@ class SolverPromptBuilder(BasePromptBuilder):
         return output
 
 
-    #TODO: Make sure this updated system prompt works just as well.
     def system_message(self):
         return  {
                 "type": "text",
                 "text": dedent("""\
                     # Instructions
-                    You are a UI Assistant, your goal is to help the user perform tasks using a web browser. 
-                    Review the instructions from the user, the current state of the page and all other information to find the best possible next action to accomplish your goal. Your answer will be interpreted and executed by a program, make sure to follow the formatting instructions.
+                    You are a UI Assistant helping users perform tasks using a web browser. 
+                    Review the current page state and determine the best next action.
                     
-                    ## Action Format Requirements
-                    **CRITICAL**: When interacting with elements, you MUST use the element's bid (browsergym id) which is shown in square brackets in the accessibility tree.
-                    - CORRECT: click('42') where 42 is the bid from [42] in the tree
-                    - WRONG: click('Submit Button') or click('Next Page') - do NOT use text labels
+                    ## Action Format (CRITICAL)
+                    Use element's `bid` from square brackets in the accessibility tree.
+                    - CORRECT: click('42') where 42 is the bid from [42]
+                    - WRONG: click('Submit') - do NOT use text labels
                     """
                 )
         }
@@ -164,13 +163,12 @@ class SolverPromptBuilder(BasePromptBuilder):
         
         
     def action_space_message(self, action_set: AbstractActionSet):
-        newline = "\n"
         return  {
                 "type": "text",
-                "text": ("# Action Space"
-                    f"{self.action_set_description}\n\n"
-                    "Here are examples of actions with chain-of-thought reasoning:\n\n"
-                    f"{newline.join(newline + json.dumps(cot_example) for cot_example in self.cot_examples())}\n\n\n"
+                "text": (
+                    "# Action Space\n"
+                    "Available actions: click(bid), fill(bid, text), scroll(x, y), goto(url)\n\n"
+                    "Output format: {\"thought\": \"reasoning\", \"action\": \"click('42')\"}\n"
                 )
         }
         
@@ -215,8 +213,9 @@ class SolverPromptBuilder(BasePromptBuilder):
         return  {
                 "type": "text",
                 "text": (
-                    "# Next action\n\n"
-                    "You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page before deciding on your next action. Provide your output as a single json with a thought and an action. All reasoning must be contained within the thought key of the json output, and only a single action must be provided for the action key. Future actions will be taken subsequently. If you have finished performing the request, send a message to the user in a concise and to the point manner."
+                    "# Next Action\n"
+                    "Think step by step about the best next action. "
+                    "Output a single JSON with thought and action keys.\n"
                 )
         }
         

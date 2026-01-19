@@ -1,0 +1,149 @@
+# rllm_agentzero Training Configuration
+# Uses rLLM's verl backend for GRPO (Group Relative Policy Optimization)
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer  # GRPO uses same base trainer but without critic
+  - _self_
+
+# Model Configuration
+model_id: "qwen/Qwen2.5-3B-Instruct"
+model_cache_dir: "/root/autodl-tmp/models"
+
+# Actor/Rollout Model Configuration (verl required)
+actor_rollout_ref:
+  model:
+    path: "/root/autodl-tmp/models/qwen/Qwen2___5-3B-Instruct"
+    use_shm: false
+  rollout:
+    name: vllm
+    mode: async
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.7  # GRPO 不需要 critic，可以使用更多显存
+    n: 4  # GRPO: group sampling，每个 prompt 生成 4 个 response
+    max_model_len: 8192  # 增加 context window
+    log_prob_micro_batch_size_per_gpu: 1  # 移动到这里
+    multi_turn:
+      use_inference_chat_template: true  # 排除 reasoning 内容以节省 context
+      tokenization_sanity_check_mode: "ignore_strippable"
+    agent:
+      num_workers: 0
+    val_kwargs:
+      do_sample: true
+  actor:
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 8192
+
+# Algorithm Configuration - GRPO (Group Relative Policy Optimization)
+algorithm:
+  adv_estimator: grpo  # 使用 GRPO 作为 advantage estimator，完全不需要 critic
+  kl_ctrl:
+    kl_coef: 0.001  # GRPO 通常使用较小的 KL 系数
+
+# Exploration Configuration
+max_steps: 20
+max_nodes: 50
+max_repeats: 3
+
+# Data Configuration
+data:
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 1
+  train_files: null
+  val_files: null
+  gen_batch_size: 1
+  return_multi_modal_inputs: false
+  max_prompt_length: 5500  # 增加到 5500 以容纳较长的 prompt
+  max_response_length: 512  # 减少 response 长度以保持总长度在 6144 内
+
+# rLLM Workflow Configuration (required for verl)
+rllm:
+  agent:
+    name: exploration_agent
+    max_steps: 20
+    trajectory_timeout: null
+    overlong_filter: false
+    agent_args: {}
+    engine_args: {}
+  env:
+    name: webarena
+    env_args: {}
+  workflow:
+    use_workflow: true
+    name: exploration_workflow
+    workflow_args:
+      timeout: 600
+      gamma: 0.99
+      reward_bonus_coeff: 1.0
+    n_parallel_tasks: 4
+    retry_limit: 3
+  disable_thinking: false
+  accumulate_reasoning: false
+  mask_truncated_samples: false
+  filter_token_mismatch: true
+  stepwise_advantage:
+    enable: false
+    mode: broadcast
+    normalize_by_steps: false
+  compact_filtering:
+    enable: true  # 启用过滤以处理超长样本
+    mask_max_prompt_length_exceeded: true
+    mask_max_response_length_exceeded: true
+    mask_env_done: false
+    mask_max_turns_exceeded: true
+    mask_timeout: true
+    mask_unknown: false
+    mask_error: true
+  rejection_sample:
+    enable: false
+    multiplier: 1
+  distill:
+    enable: false
+
+# Graph World Model - Embedding
+encoder_model: "sentence-transformers/all-MiniLM-L6-v2"
+use_modelscope: true
+similarity_threshold: 0.95
+
+# Environment
+headless: true
+timeout: 30000
+
+# Training URLs
+train_urls:
+  - "http://3.148.75.200:7770/"
+test_urls:
+  - "http://3.148.75.200:7770/"
+
+# Reward Configuration
+temperature: 1.0
+max_tokens: 2048
+gamma: 0.99
+reward_bonus_coeff: 1.0
+
+# Trainer
+trainer:
+  max_epochs: 100
+  save_interval: 10
+  eval_interval: 5
+  log_interval: 1
+  log_episodes: false
+  project_name: "rllm_agentzero"
+  experiment_name: "webarena_exploration_grpo"
+  logger: ["console"]  # 禁用 wandb，只用 console
+  n_gpus_per_node: 2  # 使用 2 个 GPU
+  nnodes: 1
+
+
+# Ray Configuration
+ray_init:
+  num_cpus: 8
+  num_gpus: 2  # 使用 2 个 GPU
+
+# Output
+output_dir: "/root/autodl-tmp/models/output"
+exp_name: "webarena_exploration_grpo"

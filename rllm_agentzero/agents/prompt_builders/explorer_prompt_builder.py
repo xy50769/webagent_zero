@@ -12,36 +12,24 @@ class ExplorerPromptBuilder(SolverPromptBuilder):
     
     def system_message(self):
         """
-        Override parent's system_message to add explicit History usage rules for exploration.
+        Override parent's system_message to add exploration-specific instructions.
         """
         return {
             "type": "text",
             "text": dedent("""\
                 # Instructions
-                You are a UI Assistant specialized in exploration, your goal is to help the user explore and discover new states in a web browser.
-                Review the instructions from the user, the current state of the page and all other information to find the best possible next action to accomplish your goal. Your answer will be interpreted and executed by a program, make sure to follow the formatting instructions.
+                You are a **Web Explorer Agent**. Your goal is to map the structure of the website.
                 
-                ## Action Format Requirements
-                **CRITICAL**: When interacting with elements, you MUST use the element's bid (browsergym id) which is shown in square brackets in the accessibility tree.
-                - CORRECT: click('42') where 42 is the bid from [42] in the tree
-                - WRONG: click('Page 2') or click('Next') - do NOT use text labels
-                
-                ## History Usage Rules
-                You are given a history of past actions and their outcomes. You must follow these rules:
-                
-                1. **Avoid Repetition**: Do NOT repeat actions that have already been taken, unless they may lead to a different state (e.g., clicking on a dynamic element, submitting a form with different data, or navigating to a page that may have changed).
-                
-                2. **Prefer Novel Actions**: Prioritize actions that have NOT appeared in the history. Novel actions are more likely to lead to undiscovered states and provide new information.
-                
-                3. **Use History for Inference**: Analyze the history to infer:
-                   - Which elements or links have already been explored
-                   - Which pages have been visited
-                   - Which interaction patterns have been tried
-                   - Which areas of the website remain unexplored
-                
-                4. **Maximize Information Gain**: Your goal is exploration. Each action should aim to discover new states, reveal new elements, or expose new functionality. Avoid actions that are likely to result in already-seen states.
-                """
-            )
+                ## Action Format (CRITICAL)
+                Use element's `bid` from square brackets `[...]` in the accessibility tree.
+                - CORRECT: `click('42')` (where 42 is the bid)
+                - WRONG: `click('Add to Cart')` (Do NOT use text labels)
+
+                ## Exploration Strategy
+                1. **Prioritize content over navigation**: Click product items, forms, buttons rather than nav links
+                2. **Avoid repetition**: Do NOT repeat actions already taken
+                3. **Maximize discovery**: Find new states (popups, forms, checkout flows)
+               """)
         }
     
     def construct_explorer_prompt_messages(
@@ -57,63 +45,52 @@ class ExplorerPromptBuilder(SolverPromptBuilder):
         Build prompt with Exploration Mask and Frontier Info
         """
         # 1. Get base prompt (Goal, AxTree, History)
+        # Truncate AXTree to fit within max_prompt_length (3000 chars ~ 750 tokens)
+        axtree_txt = obs.get("axtree_txt", "")
+        max_axtree_chars = 3000  # ~750 tokens, safe margin for other content
+        if len(axtree_txt) > max_axtree_chars:
+             axtree_txt = axtree_txt[:max_axtree_chars] + "\n...[AXTree Truncated]..."
+        
         current_step = BrowserGymAgentStepData(
-            axtree=obs.get("axtree_txt", ""),
+            axtree=axtree_txt,
             last_action_error=obs.get("last_action_error", "")
         )
         
-        messages_dict = self.build_messages(goal, current_step, history)
+        # Pass char_limit to enable history truncation if prompt is too long
+        # max_prompt_length is 5500 in config, using 5000 as safety buffer
+        messages_dict = self.build_messages(goal, current_step, history, char_limit=5000)
         messages = messages_dict['prompt']
         
-        # 2. Inject Frontier Guidance
+        # 2. Inject Frontier Guidance (compact)
         if frontier_info:
             frontier_msg = (
-                f"\n\n### Exploration Guidance (Frontier)\n"
-                f"There are unexplored areas of the website (Frontier Nodes) that need attention.\n"
-                f"Target Node ID: {frontier_info.get('node_id', 'Unknown')}\n"
-                f"Target URL: {frontier_info.get('url', 'Unknown')}\n"
-                f"Hint: Try to perform actions that might lead towards this area or similar unexplored states."
+                f"\n\n### Frontier Node\n"
+                f"Target: {frontier_info.get('node_id', 'Unknown')} - {frontier_info.get('url', 'Unknown')}"
             )
             messages[-1]['content'] += frontier_msg
 
         # 3. Inject Element-level Exploration Guidance
         if unvisited_elements and len(unvisited_elements) > 0:
-            element_guidance = "\n\n### Unvisited Elements (PRIORITIZE THESE)\n"
-            element_guidance += "The following elements on this page have NOT been interacted with yet:\n\n"
+            limit = 10
+            element_guidance = "\n\n### Unvisited Elements (PRIORITIZE)\n"
             
-            for i, elem in enumerate(unvisited_elements[:]):
-                element_guidance += f"  - bid='{elem['bid']}' [{elem['role']}]: \"{elem['text'][:60]}\"\n"
+            for elem in unvisited_elements[:limit]:
+                element_guidance += f"- bid='{elem['bid']}' [{elem['role']}]: {elem['text'][:50]}\n"
+            
+            if len(unvisited_elements) > limit:
+                element_guidance += f"... (+{len(unvisited_elements) - limit} more)\n"
 
-            element_guidance += (
-                "\n**EXPLORATION STRATEGY**: Please select the element from the unvisited elements above that you think is most likely to reach the new state and interact with it.\n"
-            )
             messages[-1]['content'] += element_guidance
         
-        # 4. Inject Exploration Mask (Visited Elements Warning)
+        # 4. Compact Visited Elements Warning
         if visited_elements and len(visited_elements) > 0:
-            mask_msg = (
-                f"\n\n### Already Explored Elements (Avoid Unless Necessary)\n"
-                f"These {len(visited_elements)} elements have been interacted with: "
-                f"{visited_elements[:20]}"
-            )
-            
-            mask_msg += "\nPrefer unvisited elements to maximize exploration efficiency.\n"
+            mask_msg = f"\n\n### Already Explored ({len(visited_elements)} elements) - avoid unless necessary\n"
             messages[-1]['content'] += mask_msg
         
         return messages
 
     def cot_examples(self) -> list[dict]:
         return [
-            {
-                "thought": "The goal is to explore new states. I see a 'Reviews' link (bid 42) that I haven't visited yet. This looks like a promising Frontier.", 
-                "action": "click('42')"
-            },
-            {
-                "thought": "I am on the product page. I've already clicked 'Description'. Now I will try adding the item to the cart (bid 1310) to see if it triggers a popup or a new state (Novelty).", 
-                "action": "click('1310')"
-            },
-            {
-                "thought": "I have explored all visible links. I will scroll down to reveal more potential interaction elements.", 
-                "action": "scroll(0, 1000)"
-            },
+            {"thought": "Click product to explore details", "action": "click('42')"},
+            {"thought": "Add to cart to see checkout flow", "action": "click('1310')"},
         ]
