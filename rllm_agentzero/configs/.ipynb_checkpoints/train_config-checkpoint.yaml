@@ -1,0 +1,55 @@
+# rllm_agentzero Training Configuration
+# Uses rLLM's verl backend for reinforcement learning training
+
+defaults:
+  - _self_
+
+# Model Configuration
+model_id: "qwen/Qwen2.5-3B-Instruct"  # ModelScope model ID
+model_cache_dir: "/root/autodl-tmp/models"  # 模型缓存目录
+temperature: 1.0
+max_tokens: 2048
+
+# Exploration Configuration
+max_steps: 20
+max_nodes: 50
+max_repeats: 3
+
+# Graph World Model
+encoder_model: "all-MiniLM-L6-v2"
+similarity_threshold: 0.95
+
+# Environment
+headless: true
+timeout: 30000
+
+# Training URLs
+train_urls:
+  - "http://3.148.75.200:7770/"
+test_urls:
+  - "http://3.148.75.200:7770/"
+
+# Reward Configuration
+gamma: 0.99
+reward_bonus_coeff: 0.0
+
+# Training
+data:
+  train_batch_size: 4
+  val_batch_size: 2
+  num_workers: 4
+
+trainer:
+  max_epochs: 100
+  save_interval: 10
+  eval_interval: 5
+  log_interval: 1
+
+# Ray Configuration
+ray_init:
+  num_cpus: 8
+  num_gpus: 1
+
+# Output
+output_dir: "/root/autodl-tmp/models/output"
+exp_name: "webarena_exploration"
